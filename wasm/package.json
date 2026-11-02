@@ -1,0 +1,21 @@
+{
+  "name": "boost-math-wasm",
+  "version": "0.1.0",
+  "description": "Boost.Math special functions, distributions, FFTs and statistics in WebAssembly",
+  "license": "BSL-1.0",
+  "type": "module",
+  "main": "./boost_math.mjs",
+  "types": "./boost_math.d.ts",
+  "exports": {
+    ".": {
+      "types": "./boost_math.d.ts",
+      "default": "./boost_math.mjs"
+    }
+  },
+  "files": ["boost_math.mjs", "boost_math.wasm", "boost_math.d.ts", "LICENSE", "README.md"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/boostorg/math.git",
+    "directory": "wasm"
+  }
+}
