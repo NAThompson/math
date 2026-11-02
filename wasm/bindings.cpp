@@ -16,9 +16,16 @@
 #include <boost/math/distributions.hpp>
 #include <boost/math/special_functions.hpp>
 #include <boost/math/tools/fft.hpp>
+#include <boost/math/statistics/anderson_darling.hpp>
+#include <boost/math/statistics/linear_regression.hpp>
+#include <boost/math/statistics/ljung_box.hpp>
+#include <boost/math/statistics/runs_test.hpp>
+#include <boost/math/statistics/t_test.hpp>
+#include <boost/math/statistics/z_test.hpp>
 
 #include <emscripten/bind.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cmath>
 #include <complex>
@@ -27,6 +34,7 @@
 #include <vector>
 
 namespace bm = boost::math;
+namespace st = boost::math::statistics;
 using namespace emscripten;
 
 // f(a..., x) for each x of an array, returned as a Float64Array: one call from JavaScript instead of one per x.
@@ -85,12 +93,16 @@ template <class D, class... Params>
 void distribution(const char* name)
 {
    using C = checked<D>;
+   // pdf(x) and pdf_array(xs), and so on.
+#define AT(f, e) function(f, +[](const C& c, double x) { return c.valid ? double(e) : NAN; }) \
+      .function(f "_array", +[](const C& c, const val& xs) { return map_last([&c](double x) { return c.valid ? double(e) : NAN; }, xs); })
    class_<C>(name)
       .constructor(&make<D, Params...>)
-      .function("pdf", +[](const C& c, double x) { return c.valid ? pdf(c.d, x) : NAN; })
-      .function("cdf", +[](const C& c, double x) { return c.valid ? cdf(c.d, x) : NAN; })
-      .function("ccdf", +[](const C& c, double x) { return c.valid ? cdf(complement(c.d, x)) : NAN; })
-      .function("quantile", +[](const C& c, double p) { return c.valid ? quantile(c.d, p) : NAN; })
+      .AT("pdf", pdf(c.d, x))
+      .AT("cdf", cdf(c.d, x))
+      .AT("ccdf", cdf(complement(c.d, x)))
+      .AT("quantile", quantile(c.d, x))
+#undef AT
       .function("mean", +[](const C& c) { return c.valid ? mean(c.d) : NAN; })
       .function("variance", +[](const C& c) { return c.valid ? variance(c.d) : NAN; })
       .function("entropy", +[](const C& c) { return c.valid ? entropy_of(c.d, 0) : NAN; })
@@ -101,10 +113,10 @@ void distribution(const char* name)
       });
 }
 
-// The FFTs throw for bad lengths, which would abort the module, so check first and throw a JavaScript RangeError.
-[[noreturn]] void range_error(const char* what)
+// The FFTs and statistics throw for bad sizes, which would abort the module, so check first and throw a RangeError.
+[[noreturn]] void range_error(const std::string& what)
 {
-   val::global("RangeError").new_(std::string(what)).throw_();
+   val::global("RangeError").new_(what).throw_();
    __builtin_unreachable();
 }
 
@@ -117,9 +129,10 @@ std::size_t length(double n)
 
 using cplx = std::complex<double>;
 
-val to_js(std::vector<cplx>& z)
+template <class T>
+val to_js(std::vector<T>& z)
 {
-   return val(typed_memory_view(2 * z.size(), reinterpret_cast<double*>(z.data()))).call<val>("slice");
+   return val(typed_memory_view(z.size() * sizeof(T) / sizeof(double), reinterpret_cast<double*>(z.data()))).call<val>("slice");
 }
 
 // Complex data are interleaved (re, im) Float64Arrays.
@@ -155,6 +168,116 @@ struct real_fft
    bm::tools::real_fft<cplx> f;
    std::vector<cplx> z;
 };
+
+// Transforms each lane along one axis of a C-order array with the given shape, whose elements are In (double or
+// cplx). make(n) gives the transform of one lane of length n, a function from std::vector<In> to std::vector<Out>.
+template <class In, class Make>
+val along_axis(const val& x, const val& shape, double axis, Make make)
+{
+   std::vector<double> v = convertJSArrayToNumberVector<double>(x);
+   std::vector<double> s = convertJSArrayToNumberVector<double>(shape);
+   const double d = double(s.size());
+   if (!(axis == std::trunc(axis) && axis >= -d && axis < d))
+      range_error("The axis must be an integer in [-ndim, ndim).");
+   const std::size_t a = std::size_t(axis < 0 ? axis + d : axis);
+   double before = 1, after = 1;
+   for (std::size_t i = 0; i < s.size(); ++i)
+   {
+      if (!(s[i] >= 1 && s[i] == std::trunc(s[i])))
+         range_error("The shape must hold positive integers.");
+      if (i != a)
+         (i < a ? before : after) *= s[i];
+   }
+   if (before * s[a] * after * (sizeof(In) / sizeof(double)) != double(v.size()))
+      range_error(sizeof(In) == sizeof(double) ? "The data must hold product(shape) numbers."
+                                               : "The data must hold 2 product(shape) numbers.");
+   const std::size_t outer = std::size_t(before), n = length(s[a]), inner = std::size_t(after);
+   auto t = make(n);
+   const In* in = reinterpret_cast<const In*>(v.data());
+   std::vector<In> lane(n);
+   std::vector<std::decay_t<decltype(t(lane)[0])>> out;
+   for (std::size_t o = 0; o < outer; ++o)
+      for (std::size_t i = 0; i < inner; ++i)
+      {
+         for (std::size_t j = 0; j < n; ++j)
+            lane[j] = in[(o * n + j) * inner + i];
+         const auto& y = t(lane);
+         out.resize(outer * y.size() * inner);
+         for (std::size_t k = 0; k < y.size(); ++k)
+            out[(o * y.size() + k) * inner + i] = y[k];
+      }
+   return to_js(out);
+}
+
+val fft_axis(const val& x, const val& shape, double axis, bool inverse)
+{
+   return along_axis<cplx>(x, shape, axis, [inverse](std::size_t n) {
+      return [f = bm::tools::fft<cplx>(n), inverse](std::vector<cplx>& z) mutable -> std::vector<cplx>& {
+         inverse ? f.inverse_transform(z) : f.transform(z);
+         return z;
+      };
+   });
+}
+
+val real_fft_axis(const val& x, const val& shape, double axis)
+{
+   return along_axis<double>(x, shape, axis, [](std::size_t n) {
+      return [f = bm::tools::real_fft<cplx>(n), z = std::vector<cplx>(n / 2 + 1)](std::vector<double>& v) mutable -> std::vector<cplx>& {
+         f.transform(v, z);
+         return z;
+      };
+   });
+}
+
+// P[k] = c |X[k]|^2 / n^2 for k = 0, ..., n/2, with c = 1 at k = 0 and the Nyquist k = n/2 and c = 2 otherwise:
+// sum P = mean(x^2), and A cos(2 pi k j / n) gives P[k] = A^2 / 2.
+val power_spectrum_axis(const val& x, const val& shape, double axis)
+{
+   return along_axis<double>(x, shape, axis, [](std::size_t n) {
+      return [f = bm::tools::real_fft<cplx>(n), z = std::vector<cplx>(n / 2 + 1), p = std::vector<double>(n / 2 + 1), n](
+                std::vector<double>& v) mutable -> std::vector<double>& {
+         f.transform(v, z);
+         for (std::size_t k = 0; k < z.size(); ++k)
+            p[k] = (k == 0 || 2 * k == n ? 1 : 2) * std::norm(z[k]) / (double(n) * double(n));
+         return p;
+      };
+   });
+}
+
+// The statistics assert or throw on too few values, so check first.
+std::vector<double> sample(const val& x, std::size_t at_least)
+{
+   std::vector<double> v = convertJSArrayToNumberVector<double>(x);
+   if (v.size() < at_least)
+      range_error("The array needs at least " + std::to_string(at_least) + (at_least == 1 ? " value." : " values."));
+   return v;
+}
+
+std::vector<double> same_size(const val& y, const std::vector<double>& x)
+{
+   std::vector<double> v = sample(y, x.size());
+   if (v.size() != x.size())
+      range_error("The arrays must have the same length.");
+   return v;
+}
+
+// Sorting and selection need an order, which NaN breaks.
+bool has_nan(const std::vector<double>& v)
+{
+   return std::any_of(v.begin(), v.end(), [](double x) { return std::isnan(x); });
+}
+
+val test_result(std::pair<double, double> r)
+{
+   val o = val::object();
+   o.set("statistic", r.first);
+   o.set("p_value", r.second);
+   return o;
+}
+
+// The statistics of one array, which needs at least n values.
+#define S1(f, n) function(#f, +[](const val& x) { std::vector<double> v = sample(x, n); return double(st::f(v)); })
+#define S1_ORDER(f, n) function(#f, +[](const val& x) { std::vector<double> v = sample(x, n); return has_nan(v) ? NAN : double(st::f(v)); })
 
 EMSCRIPTEN_BINDINGS(boost_math)
 {
@@ -231,4 +354,71 @@ EMSCRIPTEN_BINDINGS(boost_math)
       .function("transform", +[](fft& f, const val& x) { return f.run(x, false); })
       .function("inverse_transform", +[](fft& f, const val& x) { return f.run(x, true); });
    class_<real_fft>("real_fft").constructor<double>().function("transform", &real_fft::transform);
+   function("fft_axis", +[](const val& x, const val& shape, double axis) { return fft_axis(x, shape, axis, false); });
+   function("inverse_fft_axis", +[](const val& x, const val& shape, double axis) { return fft_axis(x, shape, axis, true); });
+   function("real_fft_axis", &real_fft_axis);
+   function("power_spectrum_axis", &power_spectrum_axis);
+   function("power_spectrum", +[](const val& x) { return power_spectrum_axis(x, val::array(std::vector<double>{x["length"].as<double>()}), 0); });
+
+   S1(mean, 1); S1(variance, 1); S1(sample_variance, 2); S1(skewness, 1); S1(kurtosis, 1); S1(excess_kurtosis, 1);
+   S1_ORDER(median, 1); S1_ORDER(median_absolute_deviation, 1); S1_ORDER(interquartile_range, 3);
+   S1_ORDER(gini_coefficient, 1); S1_ORDER(sample_gini_coefficient, 2);
+   function("mean_and_sample_variance", +[](const val& x) {
+      std::vector<double> v = sample(x, 2);
+      auto [m, s2] = st::mean_and_sample_variance(v);
+      val o = val::object();
+      o.set("mean", m);
+      o.set("sample_variance", s2);
+      return o;
+   });
+   function("covariance", +[](const val& x, const val& y) { std::vector<double> u = sample(x, 1); return st::covariance(u, same_size(y, u)); });
+   function("correlation_coefficient", +[](const val& x, const val& y) {
+      std::vector<double> u = sample(x, 1);
+      return st::correlation_coefficient(u, same_size(y, u));
+   });
+   function("simple_ordinary_least_squares", +[](const val& x, const val& y) {
+      std::vector<double> u = sample(x, 2), v = same_size(y, u);
+      if (st::variance(u) <= 0)
+         range_error("x must not be constant.");
+      auto [c0, c1, r2] = st::simple_ordinary_least_squares_with_R_squared(u, v);
+      val o = val::object();
+      o.set("intercept", c0);
+      o.set("slope", c1);
+      o.set("r_squared", r2);
+      return o;
+   });
+   function("one_sample_t_test", +[](const val& x, double mu) { return test_result(st::one_sample_t_test(sample(x, 2), mu)); });
+   function("one_sample_z_test", +[](const val& x, double mu) { return test_result(st::one_sample_z_test(sample(x, 2), mu)); });
+   function("two_sample_t_test", +[](const val& x, const val& y) { return test_result(st::two_sample_t_test(sample(x, 2), sample(y, 2))); });
+   function("two_sample_z_test", +[](const val& x, const val& y) { return test_result(st::two_sample_z_test(sample(x, 2), sample(y, 2))); });
+   function("paired_samples_t_test", +[](const val& x, const val& y) {
+      std::vector<double> u = sample(x, 2);
+      return test_result(st::paired_samples_t_test(u, same_size(y, u)));
+   });
+   function("runs_above_and_below_threshold", +[](const val& x, double t) {
+      std::vector<double> v = sample(x, 2);
+      return test_result(has_nan(v) ? std::pair<double, double>(NAN, NAN) : st::runs_above_and_below_threshold(v, t));
+   });
+   function("runs_above_and_below_median", +[](const val& x) {
+      std::vector<double> v = sample(x, 2);
+      return test_result(has_nan(v) ? std::pair<double, double>(NAN, NAN) : st::runs_above_and_below_median(v));
+   });
+   // Sorts a copy of the data, and estimates the mean and standard deviation from it.
+   function("anderson_darling_normality_statistic", +[](const val& x) -> double {
+      std::vector<double> v = sample(x, 2);
+      if (has_nan(v))
+         return NAN;
+      std::sort(v.begin(), v.end());
+      return st::anderson_darling_normality_statistic(v);
+   });
+   // lags = -1 takes ceil(log(n)) lags.
+   function("ljung_box", +[](const val& x, double lags, double fit_dof) {
+      std::vector<double> v = sample(x, 2);
+      const double n = double(v.size()), l = lags == -1 ? std::ceil(std::log(n)) : lags;
+      if (!(l == std::trunc(l) && l >= 1 && l < n))
+         range_error("The lags must be -1 or an integer in [1, n).");
+      if (!(fit_dof == std::trunc(fit_dof) && std::abs(fit_dof) < 1e15))
+         range_error("fit_dof must be an integer.");
+      return test_result(st::ljung_box(v, int64_t(l), int64_t(fit_dof)));
+   });
 }
