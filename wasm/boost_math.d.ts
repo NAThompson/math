@@ -301,6 +301,12 @@ export interface BoostMath {
   /** power_spectrum_axis(x, [x.length], 0). */
   power_spectrum(x: Samples): Float64Array;
 
+  // Trend filtering: argmin_x 1/2 sum (y - x)^2 + lambda sum |D^(k+1) x|, piecewise constant (k = 0), linear (1)
+  // or quadratic (2). Bad k or lambda, or fewer than k + 2 samples, give all NaN.
+  trend_filter(y: Samples, k: number, lambda: number): Float64Array;
+  /** k and lambda chosen by even/odd cross-validation; needs at least 4 samples. */
+  trend_filter(y: Samples): Float64Array;
+
   // Statistics of the values in an array. Too few values, or arrays of different lengths, throw a RangeError; the
   // count needed is given for each. Any NaN in the data makes the result NaN.
   /** n >= 1. */

@@ -15,6 +15,7 @@
 
 #include <boost/math/distributions.hpp>
 #include <boost/math/special_functions.hpp>
+#include <boost/math/filters/trend_filter.hpp>
 #include <boost/math/tools/fft.hpp>
 #include <boost/math/statistics/anderson_darling.hpp>
 #include <boost/math/statistics/linear_regression.hpp>
@@ -359,6 +360,17 @@ EMSCRIPTEN_BINDINGS(boost_math)
    function("real_fft_axis", &real_fft_axis);
    function("power_spectrum_axis", &power_spectrum_axis);
    function("power_spectrum", +[](const val& x) { return power_spectrum_axis(x, val::array(std::vector<double>{x["length"].as<double>()}), 0); });
+
+   // A non-integer k becomes -1, which the filter rejects like any other bad k: the result is all NaN.
+   function("trend_filter", +[](const val& x, double k, double lambda) {
+      std::vector<double> v = convertJSArrayToNumberVector<double>(x);
+      v = bm::filters::trend_filter(v, k == std::trunc(k) && std::abs(k) < 8 ? int(k) : -1, lambda);
+      return val(typed_memory_view(v.size(), v.data())).call<val>("slice");
+   });
+   function("trend_filter", +[](const val& x) {
+      std::vector<double> v = bm::filters::trend_filter(convertJSArrayToNumberVector<double>(x));
+      return val(typed_memory_view(v.size(), v.data())).call<val>("slice");
+   });
 
    S1(mean, 1); S1(variance, 1); S1(sample_variance, 2); S1(skewness, 1); S1(kurtosis, 1); S1(excess_kurtosis, 1);
    S1_ORDER(median, 1); S1_ORDER(median_absolute_deviation, 1); S1_ORDER(interquartile_range, 3);

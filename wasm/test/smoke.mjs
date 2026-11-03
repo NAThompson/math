@@ -211,3 +211,16 @@ test('boost_math.d.ts declares every export', () => {
    for (const name of Object.keys(bm))
       assert.match(dts, new RegExp(`^  ${name}[(:]`, 'm'), name);
 });
+
+test('trend_filter', () => {
+  const n = 256, y = new Float64Array(n);
+  for (let i = 0; i < n; ++i) y[i] = (i < n / 2 ? 0 : 1) + 0.1 * Math.sin(37 * i);
+  const x0 = bm.trend_filter(y, 0, 2);
+  assert.equal(x0.length, n);
+  assert.ok(Math.abs(x0[10]) < 0.1 && Math.abs(x0[n - 10] - 1) < 0.1);
+  assert.ok(Number.isNaN(bm.trend_filter(y, 3, 1)[0]) && Number.isNaN(bm.trend_filter(y, 1.5, 1)[0]));
+  assert.ok(Number.isNaN(bm.trend_filter(y, 1, -1)[0]));
+  const x = bm.trend_filter(y);
+  assert.equal(x.length, n);
+  assert.ok(Math.abs(x[n - 10] - 1) < 0.2);
+});
