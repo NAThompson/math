@@ -17,6 +17,7 @@
 #include <boost/math/special_functions.hpp>
 #include <boost/math/filters/trend_filter.hpp>
 #include <boost/math/tools/fft.hpp>
+#include <boost/math/tools/multivariate_roots.hpp>
 #include <boost/math/statistics/anderson_darling.hpp>
 #include <boost/math/statistics/linear_regression.hpp>
 #include <boost/math/statistics/ljung_box.hpp>
@@ -30,6 +31,7 @@
 #include <cerrno>
 #include <cmath>
 #include <complex>
+#include <cstdint>
 #include <limits>
 #include <string>
 #include <vector>
@@ -119,6 +121,58 @@ void distribution(const char* name)
 {
    val::global("RangeError").new_(what).throw_();
    __builtin_unreachable();
+}
+
+// f(x) for the multivariate solvers returns [F, J] or [F, J, d2]: F an array of n, J n arrays of n or n*n numbers
+// row major, and d2(v) = F''(x)[v, v] an array of n. A wrong shape throws a RangeError, and so does anything f
+// throws: both unwind through the solver, so its scratch memory leaks, a few times n^2 doubles.
+struct js_system
+{
+   val f;
+   std::size_t n;
+
+   static std::vector<double> numbers(const val& a, std::size_t count, const char* what)
+   {
+      std::vector<double> v;
+      if (a.isArray() && a["length"].as<std::size_t>() > 0 && a[0].isArray())
+         v = convertJSArrayToNumberVector<double>(a.call<val>("flat"));
+      else if (!a.isUndefined() && !a.isNull())
+         v = convertJSArrayToNumberVector<double>(a);
+      if (v.size() != count)
+         range_error(std::string(what) + " has " + std::to_string(v.size()) + " numbers, expected " + std::to_string(count) + ".");
+      return v;
+   }
+
+   auto operator()(const std::vector<double>& x) const
+   {
+      val r = f(to_js(x));
+      if (!r.isArray() || r["length"].as<std::size_t>() < 2)
+         range_error("f(x) must return [F, J] or [F, J, d2].");
+      val d2 = r["length"].as<std::size_t>() > 2 ? r[2] : val::undefined();
+      auto second = [d2, n = n](const std::vector<double>& v) {
+         if (d2.typeOf().as<std::string>() != "function")
+            range_error("multivariate_halley: f(x) must return [F, J, d2], with d2 a function.");
+         return numbers(d2(to_js(v)), n, "d2(v)");
+      };
+      return std::make_tuple(numbers(r[0], n, "F(x)"), numbers(r[1], n * n, "J(x)"), second);
+   }
+
+   static val to_js(const std::vector<double>& x) { return val(typed_memory_view(x.size(), x.data())).call<val>("slice"); }
+};
+
+// {root, iterations}: the root is all NaN if the solver failed, and iterations == max_iterations if it did not converge.
+template <bool Halley>
+val multivariate_root(const val& f, const val& x0, double digits, double max_iterations)
+{
+   std::vector<double> x = convertJSArrayToNumberVector<double>(x0);
+   std::uintmax_t it = max_iterations >= 1 && max_iterations < 1e15 ? std::uintmax_t(max_iterations) : 1000;
+   const int d = digits >= 1 && digits <= 53 ? int(digits) : 53;
+   const js_system sys{f, x.size()};
+   x = Halley ? bm::tools::multivariate_halley(sys, std::move(x), d, it) : bm::tools::multivariate_newton(sys, std::move(x), d, it);
+   val o = val::object();
+   o.set("root", js_system::to_js(x));
+   o.set("iterations", double(it));
+   return o;
 }
 
 std::size_t length(double n)
@@ -360,6 +414,13 @@ EMSCRIPTEN_BINDINGS(boost_math)
    function("real_fft_axis", &real_fft_axis);
    function("power_spectrum_axis", &power_spectrum_axis);
    function("power_spectrum", +[](const val& x) { return power_spectrum_axis(x, val::array(std::vector<double>{x["length"].as<double>()}), 0); });
+
+   function("multivariate_newton", +[](const val& f, const val& x0) { return multivariate_root<false>(f, x0, 53, 1000); });
+   function("multivariate_newton", +[](const val& f, const val& x0, double d) { return multivariate_root<false>(f, x0, d, 1000); });
+   function("multivariate_newton", &multivariate_root<false>);
+   function("multivariate_halley", +[](const val& f, const val& x0) { return multivariate_root<true>(f, x0, 53, 1000); });
+   function("multivariate_halley", +[](const val& f, const val& x0, double d) { return multivariate_root<true>(f, x0, d, 1000); });
+   function("multivariate_halley", &multivariate_root<true>);
 
    // A non-integer k becomes -1, which the filter rejects like any other bad k: the result is all NaN.
    function("trend_filter", +[](const val& x, double k, double lambda) {

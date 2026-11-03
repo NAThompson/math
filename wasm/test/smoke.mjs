@@ -224,3 +224,31 @@ test('trend_filter', () => {
   assert.equal(x.length, n);
   assert.ok(Math.abs(x[n - 10] - 1) < 0.2);
 });
+
+test('multivariate_newton and multivariate_halley', () => {
+  // x^2 + y^2 = 4 and x = y: the root (sqrt 2, sqrt 2) from (1, 2).
+  const circle = (x) => [[x[0] ** 2 + x[1] ** 2 - 4, x[0] - x[1]], [[2 * x[0], 2 * x[1]], [1, -1]],
+                         (v) => [2 * v[0] ** 2 + 2 * v[1] ** 2, 0]];
+  for (const solve of [bm.multivariate_newton, bm.multivariate_halley]) {
+    const { root, iterations } = solve(circle, [1, 2]);
+    close(root[0], Math.SQRT2, 2e-16);
+    close(root[1], Math.SQRT2, 2e-16);
+    assert.ok(iterations > 0 && iterations < 10);
+  }
+  // J flat row major, Newton only (no d2): z^3 = 1 as a real 2x2 system, from near the root exp(2 pi i / 3).
+  const cube = (x) => {
+    const [a, b] = x;
+    return [[a ** 3 - 3 * a * b * b - 1, 3 * a * a * b - b ** 3], [3 * a * a - 3 * b * b, -6 * a * b, 6 * a * b, 3 * a * a - 3 * b * b]];
+  };
+  const r = bm.multivariate_newton(cube, [-0.4, 0.8], 53, 100).root;
+  close(r[0], -0.5, 2e-16);
+  close(r[1], Math.sqrt(3) / 2, 2e-16);
+  assert.throws(() => bm.multivariate_halley(cube, [-0.4, 0.8]), RangeError);
+  assert.throws(() => bm.multivariate_newton((x) => [[x[0]], [[1, 0], [0, 1]]], [1, 2]), RangeError);
+  assert.throws(() => bm.multivariate_newton(() => { throw new TypeError('mine'); }, [1]), TypeError);
+  // x^2 + 1 = 0 has no real root: NaN.
+  assert.ok(Number.isNaN(bm.multivariate_newton((x) => [[x[0] ** 2 + 1], [2 * x[0]]], [0.5]).root[0]));
+  // Halley's steps more than Newton's are a cubic vs quadratic rate: fewer iterations from far away.
+  const far = [3, 0.5];
+  assert.ok(bm.multivariate_halley(circle, far).iterations < bm.multivariate_newton(circle, far).iterations);
+});

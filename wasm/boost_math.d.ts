@@ -301,6 +301,16 @@ export interface BoostMath {
   /** power_spectrum_axis(x, [x.length], 0). */
   power_spectrum(x: Samples): Float64Array;
 
+  // Multivariate root finding. f(x) returns [F, J], F(x) an array of n and J(x) the Jacobian, J[i][j] = dF_i/dx_j, as n
+  // arrays of n or n*n numbers row major; Halley also needs d2(v) = F''(x)[v, v], the second derivative of
+  // t -> F(x + t v) at t = 0. digits (default 53) is the accuracy wanted in bits; max_iterations defaults to 1000.
+  // The root is all NaN on failure (e.g. a local minimum of |F| that is not a root); iterations == max_iterations
+  // means it did not converge. A wrong shape from f, or an exception f throws, propagates as a RangeError / that exception.
+  multivariate_newton(f: (x: Float64Array) => [Samples, Samples | Samples[], ...unknown[]], x0: Samples, digits?: number,
+                      max_iterations?: number): { root: Float64Array; iterations: number };
+  multivariate_halley(f: (x: Float64Array) => [Samples, Samples | Samples[], (v: Float64Array) => Samples], x0: Samples,
+                      digits?: number, max_iterations?: number): { root: Float64Array; iterations: number };
+
   // Trend filtering: argmin_x 1/2 sum (y - x)^2 + lambda sum |D^(k+1) x|, piecewise constant (k = 0), linear (1)
   // or quadratic (2). Bad k or lambda, or fewer than k + 2 samples, give all NaN.
   trend_filter(y: Samples, k: number, lambda: number): Float64Array;

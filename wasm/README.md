@@ -28,6 +28,7 @@ bm.fft_axis(z, [rows, cols], 0);              // each column of complex (re, im)
 bm.one_sample_t_test(x, 0);                   // {statistic, p_value}; also z, two sample, paired, runs, Ljung-Box
 bm.simple_ordinary_least_squares(x, y);       // {intercept, slope, r_squared}
 bm.trend_filter(y, 1, 10);                    // piecewise linear fit; bm.trend_filter(y) picks k and lambda
+bm.multivariate_halley(x => [F(x), J(x), v => d2(x, v)], x0);  // {root, iterations}; also multivariate_newton
 ```
 
 `boost_math.d.ts` documents the whole API and its conventions. The build directory is an npm package (`npm pack`).
