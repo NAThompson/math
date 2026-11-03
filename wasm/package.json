@@ -1,7 +1,7 @@
 {
   "name": "boost-math-wasm",
-  "version": "0.1.0",
-  "description": "Boost.Math special functions, distributions, FFTs and statistics in WebAssembly",
+  "version": "0.2.0",
+  "description": "Boost.Math special functions, distributions, FFTs, statistics and trend filtering in WebAssembly",
   "license": "BSL-1.0",
   "type": "module",
   "main": "./boost_math.mjs",
