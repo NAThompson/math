@@ -343,6 +343,8 @@ export interface BoostMath {
   gini_coefficient(x: Samples): number;
   /** n gini_coefficient / (n - 1); n >= 2. */
   sample_gini_coefficient(x: Samples): number;
+  /** (sqrt(n) - ||x||_1 / ||x||_2) / (sqrt(n) - 1), in [0, 1]: 0 when all |x_i| are equal, 1 for one nonzero; n >= 2. */
+  hoyer_sparsity(x: Samples): number;
   /** The population covariance, sum (x - mean x)(y - mean y) / n; same lengths, n >= 1. */
   covariance(x: Samples, y: Samples): number;
   /** Pearson's r; same lengths, n >= 1. NaN if x or y is constant. */

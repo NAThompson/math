@@ -22,6 +22,7 @@
 #include <boost/math/statistics/linear_regression.hpp>
 #include <boost/math/statistics/ljung_box.hpp>
 #include <boost/math/statistics/runs_test.hpp>
+#include <boost/math/statistics/signal_statistics.hpp>
 #include <boost/math/statistics/t_test.hpp>
 #include <boost/math/statistics/z_test.hpp>
 
@@ -435,7 +436,7 @@ EMSCRIPTEN_BINDINGS(boost_math)
 
    S1(mean, 1); S1(variance, 1); S1(sample_variance, 2); S1(skewness, 1); S1(kurtosis, 1); S1(excess_kurtosis, 1);
    S1_ORDER(median, 1); S1_ORDER(median_absolute_deviation, 1); S1_ORDER(interquartile_range, 3);
-   S1_ORDER(gini_coefficient, 1); S1_ORDER(sample_gini_coefficient, 2);
+   S1_ORDER(gini_coefficient, 1); S1_ORDER(sample_gini_coefficient, 2); S1(hoyer_sparsity, 2);
    function("mean_and_sample_variance", +[](const val& x) {
       std::vector<double> v = sample(x, 2);
       auto [m, s2] = st::mean_and_sample_variance(v);

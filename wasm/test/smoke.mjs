@@ -175,6 +175,8 @@ test('statistics', () => {
    near(bm.interquartile_range(xd), 2.3);
    near(bm.gini_coefficient(xd), 0.23789473684210555);
    near(bm.sample_gini_coefficient(xd), 0.2643274853801173);
+   near(bm.hoyer_sparsity(xd), 0.11468560732221353);
+   near(bm.hoyer_sparsity([0, 0, 3, 0]), 1);
    near(bm.covariance(xd, y), 2.937);
    near(bm.correlation_coefficient(xd, y), 0.98937381873520702);
    const ols = bm.simple_ordinary_least_squares(xd, y);
