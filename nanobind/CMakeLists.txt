@@ -41,6 +41,7 @@ set(BOOST_MATH_NB_SOURCES
   src/bessel.cpp
   src/elliptic.cpp
   src/jacobi_theta.cpp
+  src/spheroidal.cpp
   src/polynomials.cpp
   src/hypergeometric.cpp
   src/distributions_continuous.cpp

@@ -5,7 +5,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "boost-math"
-version = "0.3.0"
+version = "0.4.0"
 description = "Python bindings for Boost.Math: special functions, distributions, quadrature and more"
 readme = "README.md"
 # The license file is ../LICENSE, which CMakeLists.txt installs into the wheel's dist-info.

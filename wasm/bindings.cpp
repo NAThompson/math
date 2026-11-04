@@ -37,6 +37,7 @@
 #include <string>
 #include <vector>
 
+#include <boost/math/special_functions/spheroidal.hpp>
 namespace bm = boost::math;
 namespace st = boost::math::statistics;
 using namespace emscripten;
@@ -69,6 +70,25 @@ double with_order(double n, F f)
 #define FN(f, I) function(#f, +[](double n, double x) { return with_order<I>(n, [x](I k) { return bm::f(k, x); }); }); \
    function(#f "_array", +[](double n, const val& x) { \
       return map_last([](double n, double v) { return with_order<I>(n, [v](I k) { return bm::f(k, v); }); }, x, n); })
+
+// Spheroidal wave functions f(n, m, c, x), with f_prime the derivative in x (the C++ derivative pointer).
+#define SPHEROIDAL(f) \
+   function(#f, +[](double n, double m, double c, double x) { \
+      return with_order<unsigned>(n, [&](unsigned k) { return with_order<unsigned>(m, [&](unsigned j) { return bm::f(k, j, c, x); }); }); }); \
+   function(#f "_prime", +[](double n, double m, double c, double x) { \
+      return with_order<unsigned>(n, [&](unsigned k) { return with_order<unsigned>(m, [&](unsigned j) { double d = NAN; bm::f(k, j, c, x, &d); return d; }); }); }); \
+   function(#f "_array", +[](double n, double m, double c, const val& x) { \
+      return map_last([](double n, double m, double c, double v) { \
+         return with_order<unsigned>(n, [&](unsigned k) { return with_order<unsigned>(m, [&](unsigned j) { return bm::f(k, j, c, v); }); }); }, x, n, m, c); }); \
+   function(#f "_prime_array", +[](double n, double m, double c, const val& x) { \
+      return map_last([](double n, double m, double c, double v) { \
+         return with_order<unsigned>(n, [&](unsigned k) { return with_order<unsigned>(m, [&](unsigned j) { double d = NAN; bm::f(k, j, c, v, &d); return d; }); }); }, x, n, m, c); })
+#define SPHEROIDAL_EIGENVALUE(f) \
+   function(#f, +[](double n, double m, double c) { \
+      return with_order<unsigned>(n, [&](unsigned k) { return with_order<unsigned>(m, [&](unsigned j) { return bm::f(k, j, c); }); }); }); \
+   function(#f "_array", +[](double n, double m, const val& c) { \
+      return map_last([](double n, double m, double v) { \
+         return with_order<unsigned>(n, [&](unsigned k) { return with_order<unsigned>(m, [&](unsigned j) { return bm::f(k, j, v); }); }); }, c, n, m); })
 
 // Only the constructor checks the parameters, so remember whether it set errno, and give NaN for everything
 // about an invalid distribution: mean(geometric_distribution(2.2)) would otherwise be -0.55.
@@ -352,6 +372,10 @@ EMSCRIPTEN_BINDINGS(boost_math)
    F2(hypergeometric_0F1); F3(hypergeometric_1F1); F3(hypergeometric_2F0);
    F2(jacobi_sn); F2(jacobi_cn); F2(jacobi_dn); F2(jacobi_zeta); F2(heuman_lambda); F1(ellint_d); F2(ellint_d);
    F2(jacobi_theta1); F2(jacobi_theta2); F2(jacobi_theta3); F2(jacobi_theta4);
+   SPHEROIDAL_EIGENVALUE(prolate_spheroidal_eigenvalue); SPHEROIDAL_EIGENVALUE(oblate_spheroidal_eigenvalue);
+   SPHEROIDAL(prolate_spheroidal_angular); SPHEROIDAL(oblate_spheroidal_angular);
+   SPHEROIDAL(prolate_spheroidal_radial_1); SPHEROIDAL(prolate_spheroidal_radial_2);
+   SPHEROIDAL(oblate_spheroidal_radial_1); SPHEROIDAL(oblate_spheroidal_radial_2);
    F3(ellint_rf); F3(ellint_rd); F2(ellint_rc); F3(ellint_rg);
    F2(cyl_bessel_j_prime); F2(cyl_neumann_prime); F2(cyl_bessel_i_prime); F2(cyl_bessel_k_prime);
    // Zeros are numbered m = 1, 2, ...; the order n of gegenbauer and spherical_harmonic_* comes first.
