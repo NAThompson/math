@@ -16,6 +16,7 @@
 #include <boost/math/distributions.hpp>
 #include <boost/math/special_functions.hpp>
 #include <boost/math/filters/trend_filter.hpp>
+#include <boost/math/filters/wavelet_denoise.hpp>
 #include <boost/math/tools/fft.hpp>
 #include <boost/math/tools/multivariate_roots.hpp>
 #include <boost/math/statistics/anderson_darling.hpp>
@@ -89,6 +90,48 @@ double with_order(double n, F f)
    function(#f "_array", +[](double n, double m, const val& c) { \
       return map_last([](double n, double m, double v) { \
          return with_order<unsigned>(n, [&](unsigned k) { return with_order<unsigned>(m, [&](unsigned j) { return bm::f(k, j, v); }); }); }, c, n, m); })
+
+// Wavelet denoising: the wavelet is named by its family, "daubechies" or "symlet", and p = 2..10. A bad family,
+// p, rule, length or level count gives an all-NaN result, as the error policy does inside the filters.
+namespace wavelets
+{
+namespace bf = bm::filters;
+val to_js(const std::vector<double>& v) { return val(typed_memory_view(v.size(), v.data())).call<val>("slice"); }
+std::vector<double> nans(std::size_t n) { return std::vector<double>(n, NAN); }
+bool make(const std::string& family, double p, bf::orthogonal_wavelet<double>& w)
+{
+   if (!(p == std::trunc(p) && p >= 2 && p <= 10) || (family != "daubechies" && family != "symlet"))
+      return false;
+   w = family == "symlet" ? bf::wavelet::symlet<double>(unsigned(p)) : bf::wavelet::daubechies<double>(unsigned(p));
+   return true;
+}
+bool rule(const std::string& name, bf::threshold_rule& r)
+{
+   const char* names[] = {"wiener", "universal_soft", "sure", "eb_posterior_median"};
+   for (unsigned i = 0; i < 4; ++i)
+      if (name == names[i])
+         return r = static_cast<bf::threshold_rule>(i), true;
+   return false;
+}
+val denoise_with(const val& x, const std::string& family, double p, const std::string& rule_name, double sigma)
+{
+   std::vector<double> v = convertJSArrayToNumberVector<double>(x);
+   bf::orthogonal_wavelet<double> w;
+   bf::threshold_rule r;
+   return to_js(make(family, p, w) && rule(rule_name, r) ? bf::wavelet_denoise(v, w, r, sigma) : nans(v.size()));
+}
+// levels < 0 (or NaN) means as many as the length allows.
+template <bool Forward>
+val transform(const val& x, const std::string& family, double p, double levels)
+{
+   std::vector<double> v = convertJSArrayToNumberVector<double>(x);
+   bf::orthogonal_wavelet<double> w;
+   if (!make(family, p, w) || (levels >= 0 && levels != std::trunc(levels)))
+      return to_js(nans(v.size()));
+   const std::size_t L = levels >= 0 ? std::size_t(levels) : std::size_t(-1);
+   return to_js(Forward ? bf::wavelet_transform(v, w, L) : bf::inverse_wavelet_transform(v, w, L));
+}
+} // namespace wavelets
 
 // Only the constructor checks the parameters, so remember whether it set errno, and give NaN for everything
 // about an invalid distribution: mean(geometric_distribution(2.2)) would otherwise be -0.55.
@@ -457,6 +500,15 @@ EMSCRIPTEN_BINDINGS(boost_math)
       std::vector<double> v = bm::filters::trend_filter(convertJSArrayToNumberVector<double>(x));
       return val(typed_memory_view(v.size(), v.data())).call<val>("slice");
    });
+   function("wavelet_denoise", +[](const val& x) { return wavelets::to_js(bm::filters::wavelet_denoise(convertJSArrayToNumberVector<double>(x))); });
+   function("wavelet_denoise", +[](const val& x, const std::string& f, double p) { return wavelets::denoise_with(x, f, p, "wiener", NAN); });
+   function("wavelet_denoise", +[](const val& x, const std::string& f, double p, const std::string& r) { return wavelets::denoise_with(x, f, p, r, NAN); });
+   function("wavelet_denoise", &wavelets::denoise_with);
+   function("wavelet_transform", +[](const val& x, const std::string& f, double p) { return wavelets::transform<true>(x, f, p, -1); });
+   function("wavelet_transform", &wavelets::transform<true>);
+   function("inverse_wavelet_transform", +[](const val& c, const std::string& f, double p) { return wavelets::transform<false>(c, f, p, -1); });
+   function("inverse_wavelet_transform", &wavelets::transform<false>);
+   function("denoise", +[](const val& x) { return wavelets::to_js(bm::filters::denoise(convertJSArrayToNumberVector<double>(x))); });
 
    S1(mean, 1); S1(variance, 1); S1(sample_variance, 2); S1(skewness, 1); S1(kurtosis, 1); S1(excess_kurtosis, 1);
    S1_ORDER(median, 1); S1_ORDER(median_absolute_deviation, 1); S1_ORDER(interquartile_range, 3);

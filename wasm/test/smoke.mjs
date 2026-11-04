@@ -227,6 +227,32 @@ test('trend_filter', () => {
   assert.ok(Math.abs(x[n - 10] - 1) < 0.2);
 });
 
+test('wavelet_denoise, wavelet_transform, denoise', () => {
+  // An odd, non-dyadic length: the transform on the interval needs no padding.
+  const n = 301, f = new Float64Array(n), y = new Float64Array(n);
+  let seed = 12345;
+  const u = () => (seed = (1103515245 * seed + 12345) % 2147483648) / 2147483648;
+  for (let i = 0; i < n; ++i) { f[i] = i < 150 ? 0 : 4; y[i] = f[i] + 0.3 * Math.sqrt(-2 * Math.log(1 - u())) * Math.cos(2 * Math.PI * u()); }
+  const c = bm.wavelet_transform(y, 'symlet', 4);
+  assert.equal(c.length, n);
+  let e2 = 0, c2 = 0;
+  for (let i = 0; i < n; ++i) { e2 += y[i] ** 2; c2 += c[i] ** 2; }
+  close(c2, e2, 1e-12);  // orthonormal
+  const back = bm.inverse_wavelet_transform(c, 'symlet', 4);
+  for (let i = 0; i < n; ++i) assert.ok(Math.abs(back[i] - y[i]) < 1e-12);
+  assert.ok(Math.abs(bm.inverse_wavelet_transform(bm.wavelet_transform(y, 'daubechies', 3, 2), 'daubechies', 3, 2)[7] - y[7]) < 1e-12);
+  const mse = (x) => x.reduce((s, v, i) => s + (v - f[i]) ** 2, 0) / n;
+  const noisy = mse(y);
+  for (const x of [bm.wavelet_denoise(y), bm.wavelet_denoise(y, 'daubechies', 2), bm.wavelet_denoise(y, 'symlet', 6, 'sure'),
+                   bm.wavelet_denoise(y, 'symlet', 6, 'universal_soft', 0.3), bm.denoise(y)]) {
+    assert.equal(x.length, n);
+    assert.ok(mse(x) < 0.4 * noisy, `${mse(x)} vs ${noisy}`);  // universal_soft, the weakest at the jump, gets 0.3
+  }
+  for (const bad of [bm.wavelet_transform(y, 'haar', 4), bm.wavelet_transform(y, 'symlet', 11), bm.wavelet_transform(y, 'symlet', 4, 99),
+                     bm.wavelet_denoise(y, 'symlet', 4, 'hard'), bm.wavelet_denoise(new Float64Array(5))])
+    assert.ok(Number.isNaN(bad[0]));
+});
+
 test('multivariate_newton and multivariate_halley', () => {
   // x^2 + y^2 = 4 and x = y: the root (sqrt 2, sqrt 2) from (1, 2).
   const circle = (x) => [[x[0] ** 2 + x[1] ** 2 - 4, x[0] - x[1]], [[2 * x[0], 2 * x[1]], [1, -1]],

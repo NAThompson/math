@@ -13,6 +13,8 @@
 
 /** Input arrays: Float64Array, Float32Array, number[] or any array-like of numbers. They are copied, never kept. */
 export type Samples = ArrayLike<number>;
+export type WaveletFamily = "daubechies" | "symlet";
+export type ThresholdRule = "wiener" | "universal_soft" | "sure" | "eb_posterior_median";
 
 /** An object in the wasm heap, which must be freed with delete(). */
 export interface Handle {
@@ -345,6 +347,15 @@ export interface BoostMath {
   trend_filter(y: Samples, k: number, lambda: number): Float64Array;
   /** k and lambda chosen by even/odd cross-validation; needs at least 4 samples. */
   trend_filter(y: Samples): Float64Array;
+  /** The wavelet and threshold rule chosen by even/odd cross-validation (length >= 14). */
+  wavelet_denoise(x: Samples): Float64Array;
+  /** Shrinks the coefficients of x in the wavelet family p (p = 2..10; length >= 4p - 1). sigma: the noise level, NaN (the default) to estimate it. */
+  wavelet_denoise(x: Samples, family: WaveletFamily, p: number, rule?: ThresholdRule, sigma?: number): Float64Array;
+  /** Coefficients of x, coarsest first: [a_L | d_L | ... | d_1]; levels < 0 (the default) takes as many as the length allows. */
+  wavelet_transform(x: Samples, family: WaveletFamily, p: number, levels?: number): Float64Array;
+  inverse_wavelet_transform(c: Samples, family: WaveletFamily, p: number, levels?: number): Float64Array;
+  /** The better of wavelet_denoise(x) and trend_filter(x) by the same cross-validation score. */
+  denoise(x: Samples): Float64Array;
 
   // Statistics of the values in an array. Too few values, or arrays of different lengths, throw a RangeError; the
   // count needed is given for each. Any NaN in the data makes the result NaN.

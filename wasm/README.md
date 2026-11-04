@@ -28,6 +28,8 @@ bm.fft_axis(z, [rows, cols], 0);              // each column of complex (re, im)
 bm.one_sample_t_test(x, 0);                   // {statistic, p_value}; also z, two sample, paired, runs, Ljung-Box
 bm.simple_ordinary_least_squares(x, y);       // {intercept, slope, r_squared}
 bm.trend_filter(y, 1, 10);                    // piecewise linear fit; bm.trend_filter(y) picks k and lambda
+bm.wavelet_denoise(y);                        // wavelet and rule by cross-validation; or (y, "symlet", 8, "sure", sigma)
+bm.wavelet_transform(y, "daubechies", 4);     // any length: [a_L | d_L | ... | d_1]; inverse_wavelet_transform undoes it
 bm.multivariate_halley(x => [F(x), J(x), v => d2(x, v)], x0);  // {root, iterations}; also multivariate_newton
 ```
 
