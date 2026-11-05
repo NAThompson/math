@@ -24,6 +24,7 @@
 #include <cstddef>
 #include <initializer_list>
 #include <limits>
+#include <type_traits>
 #include <vector>
 #endif
 
@@ -66,6 +67,7 @@ struct coefficients
    unsigned p;   // parity of n - m
    T s;
    T lambda;
+   T lambda_lo = 0;   // λ - lambda, from a double-length residual (eigenvalue_low_part)
    std::vector<T> d;  // d[j] = d_{p+2j}
 };
 
@@ -94,6 +96,94 @@ std::size_t sturm_count(unsigned m, unsigned p, std::size_t size, const T& s, co
       q = beta(m, k + 2, s) - x - alpha(m, k, s) * gamma(m, k + 2, s) / q;
    }
    return count;
+}
+
+// Double-length arithmetic for the eigenvalue's low part. λ ≈ -c² is a difference of terms of size c², so
+// rounding it costs an absolute error of about ε c²; where the solutions grow exponentially, which is where
+// the integrations below run, that becomes a relative error of several ε in the result. As Arb does with its
+// guard bits, the one step that amplifies the rounding is redone at higher precision: Bouwkamp's residual
+// at the rounded λ, in pairs (hi, lo) with |lo| <= ulp(hi)/2, gives λ - λ_hi by one Newton step.
+template <class T>
+struct twofold
+{
+   T hi;
+   T lo;
+   twofold(const T& h = T(0), const T& l = T(0)) : hi(h), lo(l) {}
+   static twofold sum(const T& a, const T& b)
+   {
+      const T s = a + b;
+      const T bb = s - a;
+      return { s, (a - (s - bb)) + (b - bb) };
+   }
+   friend twofold operator+(const twofold& x, const twofold& y)
+   {
+      const twofold s = sum(x.hi, y.hi);
+      return sum(s.hi, T(s.lo + x.lo + y.lo));
+   }
+   friend twofold operator-(const twofold& x) { return { -x.hi, -x.lo }; }
+   friend twofold operator-(const twofold& x, const twofold& y) { return x + -y; }
+   friend twofold operator*(const twofold& x, const twofold& y)
+   {
+      BOOST_MATH_STD_USING
+      const T p = fma(x.hi, y.hi, T(0)); // fma(a, b, 0): the rounded product, which can't be fused into the sum below
+      return sum(p, T(fma(x.hi, y.hi, -p) + x.hi * y.lo + x.lo * y.hi));
+   }
+   friend twofold operator*(const twofold& x, const T& y)
+   {
+      BOOST_MATH_STD_USING
+      const T p = fma(x.hi, y, T(0));
+      return sum(p, T(fma(x.hi, y, -p) + x.lo * y));
+   }
+   friend twofold operator/(const twofold& x, const twofold& y)
+   {
+      const T q1 = x.hi / y.hi;
+      const twofold r = x - y * twofold(q1);
+      return sum(q1, T(r.hi / y.hi));
+   }
+};
+
+template <class T>
+twofold<T> twofold_sum(const T& a, const T& b)
+{
+   return twofold<T>::sum(a, b);
+}
+
+// The leading part of a number: itself, or the high half of a double-length one.
+template <class T>
+T leading(const T& x)
+{
+   return x;
+}
+
+template <class T>
+T leading(const twofold<T>& x)
+{
+   return x.hi;
+}
+
+template <class T>
+twofold<T> exact(unsigned long long v)
+{
+   const T hi = T(v);
+   return { hi, T(static_cast<long long>(v - static_cast<unsigned long long>(hi))) };
+}
+
+// α, β and γ in double length: integer ratios times s.
+template <class T>
+void recurrence_twofold(unsigned m, unsigned k, const T& s, twofold<T>* a, twofold<T>* b, twofold<T>* g)
+{
+   const twofold<T> S = { s, T(0) };
+   const unsigned long long mk = 2ull * m + k;
+   const unsigned long long l = static_cast<unsigned long long>(m) + k;
+   const unsigned long long d = 2 * l;
+   *a = exact<T>((mk + 2) * (mk + 1)) * S / exact<T>((d + 3) * (d + 5));
+   // 2l(l+1) - 2m² - 1 >= 2m(m+1) - 2m² - 1 >= -1; the denominator is (2l-1)(2l+3), negative only for l = 0.
+   const long long num = static_cast<long long>(2 * l * (l + 1)) - 2 * static_cast<long long>(m) * m - 1;
+   const long long den = (static_cast<long long>(d) - 1) * (static_cast<long long>(d) + 3);
+   const twofold<T> ratio = (num < 0 ? -exact<T>(static_cast<unsigned long long>(-num)) : exact<T>(static_cast<unsigned long long>(num)))
+                            / (den < 0 ? -exact<T>(static_cast<unsigned long long>(-den)) : exact<T>(static_cast<unsigned long long>(den)));
+   *b = exact<T>(l * (l + 1)) + ratio * S;
+   *g = k < 2 ? twofold<T>{ T(0), T(0) } : exact<T>(static_cast<unsigned long long>(k) * (k - 1)) * S / exact<T>((d - 3) * (d - 1));
 }
 
 // Bouwkamp's function: the residual of the recurrence at k = n - m, with the ratios d_{k±2}/d_k
@@ -125,6 +215,36 @@ T bouwkamp(unsigned m, unsigned r, unsigned p, unsigned top, const T& s, const T
    }
    *derivative = -1 + alpha(m, r, s) * drho + gamma(m, r, s) * dsigma;
    return beta(m, r, s) - x + alpha(m, r, s) * rho + gamma(m, r, s) * sigma;
+}
+
+// λ - x for the eigenvalue x, rounded to T: Bouwkamp's residual at x in double length, divided by its slope.
+template <class T>
+T eigenvalue_low_part(unsigned m, unsigned r, unsigned p, unsigned top, const T& s, const T& x)
+{
+   BOOST_MATH_STD_USING
+   const twofold<T> X = { x, T(0) };
+   twofold<T> a;
+   twofold<T> b;
+   twofold<T> g;
+   twofold<T> rho = { T(0), T(0) };
+   for (unsigned k = top; k > r; k -= 2)
+   {
+      recurrence_twofold(m, k, s, &a, &b, &g);
+      rho = -g / (b + -X + a * rho);
+   }
+   twofold<T> sigma = { T(0), T(0) };
+   for (unsigned k = p; k < r; k += 2)
+   {
+      recurrence_twofold(m, k, s, &a, &b, &g);
+      sigma = -a / (b + -X + g * sigma);
+   }
+   recurrence_twofold(m, r, s, &a, &b, &g);
+   const twofold<T> f = b + -X + a * rho + g * sigma;
+   T df;
+   bouwkamp(m, r, p, top, s, x, &df);
+   const T lo = -f.hi / df;
+   // A converged eigenvalue is within a few ε of the scale |λ| + |s| of the recurrence; a larger step is no correction.
+   return (BOOST_MATH_NAMESPACE::isfinite)(lo) && abs(lo) <= 64 * tools::epsilon<T>() * (abs(x) + abs(s)) ? lo : T(0);
 }
 
 template <class T>
@@ -216,82 +336,85 @@ T eigenvalue(unsigned m, unsigned n, const T& s, unsigned top, const Policy& pol
    return policies::raise_evaluation_error<T>(function, "Eigenvalue iteration did not converge; last value %1%", x, pol);
 }
 
-// Continue (w, w') along
-//   q² w'' + 2x q w' - [(λ - c2 x²) q + σ m²] w = 0,  q = x² - σ,
-// from a to b by Taylor series; each step stays inside half the radius of convergence and, so that the
-// series does not cancel, within about one local wavelength. With σ = 1 and c2 = ±c² this is the prolate
-// radial equation (x = ξ > 1) and also the angular one (x = η, |η| < 1); with σ = -1 and c2 = c² it is
-// the oblate radial equation.
 // One Taylor step of length h from a for (w, w') along
 //   q² w'' + 2x q w' - [(λ - c2 x²) q + σ m²] w = 0,  q = x² - σ,
 // leaving in u the scaled coefficients u_k = w^(k)(a) h^k / k!, so that w(a + t h) = Σ u_k t^k on [0, 1].
-template <class T>
-void taylor_step(const T& lambda, unsigned m, int sigma, const T& c2, const T& a, const T& h, T* R, T* Rd, std::vector<T>& u)
+// N is T, or twofold<T> with λ and c2 passed in double length.
+template <class T, class N>
+void taylor_step(const N& lambda, unsigned m, int sigma, const N& c2, const T& a, const T& h, N* R, N* Rd, std::vector<N>& u, const N& lambda_lo = N(0))
 {
    BOOST_MATH_STD_USING
-   const T mm = T(m);
+   const N A = a;
+   const N H = h;
+   const N one = T(1);
    // Polynomial coefficients in t = ξ - a.
-   const T q0 = sigma > 0 ? T((a - 1) * (a + 1)) : T(a * a + 1);
-   const T q[3] = { q0, 2 * a, 1 };
-   const T P2[5] = { q0 * q0, 4 * a * q0, 4 * a * a + 2 * q0, 4 * a, 1 };
-   const T P1[4] = { 2 * a * q0, 2 * q0 + 4 * a * a, 6 * a, 2 };
-   const T Lc[3] = { lambda - c2 * a * a, -2 * c2 * a, -c2 };
-   T P0[5] = { 0, 0, 0, 0, 0 };
+   const N q0 = sigma > 0 ? (A - one) * (A + one) : A * A + one;
+   const N q[3] = { q0, N(2 * a), one };
+   const N P2[5] = { q0 * q0, N(4 * a) * q0, N(4 * a) * A + N(T(2)) * q0, N(4 * a), one };
+   const N P1[4] = { N(2 * a) * q0, N(T(2)) * q0 + N(4 * a) * A, N(6 * a), N(T(2)) };
+   const N Lc[3] = { N(lambda - c2 * A * A) + lambda_lo, -(N(2 * a) * c2), -c2 };
+   N P0[5] = { T(0), T(0), T(0), T(0), T(0) };
    for (int i = 0; i < 3; ++i)
    {
       for (int k = 0; k < 3; ++k)
       {
-         P0[i + k] -= Lc[i] * q[k];
+         P0[i + k] = P0[i + k] - Lc[i] * q[k];
       }
    }
-   P0[0] -= sigma * mm * mm;
+   P0[0] = P0[0] - N(T(sigma) * T(m) * T(m));
    // u_k neither overflows nor underflows near the singular point; the recurrence's coefficients scale by powers of h.
-   T S2[5];
-   T S1[4];
-   T S0[5];
-   T hp = 1;
+   N S2[5];
+   N S1[4];
+   N S0[5];
+   N hp = one;
    for (int i = 0; i < 5; ++i)
    {
       S2[i] = P2[i] * hp;
       if (i < 4)
       {
-         S1[i] = P1[i] * hp * h;
+         S1[i] = P1[i] * hp * H;
       }
-      S0[i] = P0[i] * hp * h * h;
-      hp *= h;
+      S0[i] = P0[i] * hp * H * H;
+      hp = hp * H;
    }
-   u.assign({ *R, h * *Rd });
-   T value = u[0] + u[1];
-   T dvalue = u[1];
+   const T eps = tools::epsilon<T>();
+   const T tol = std::is_same<N, T>::value ? T(eps / 4) : T(eps * eps / 4);
+   u.assign({ *R, H * *Rd });
+   N value = u[0] + u[1];
+   N dvalue = u[1];
    for (unsigned k = 0; k < 100000; ++k)
    {
-      T acc = 0;
+      N acc = T(0);
       for (unsigned i = 0; i <= 4; ++i)
       {
          if (i > 0 && i <= k + 2)
          {
-            acc += S2[i] * T(k - i + 2) * T(k - i + 1) * u[k - i + 2];
+            acc = acc + S2[i] * u[k - i + 2] * T(T(k - i + 2) * T(k - i + 1));
          }
          if (i < 4 && i <= k + 1)
          {
-            acc += S1[i] * T(k - i + 1) * u[k - i + 1];
+            acc = acc + S1[i] * u[k - i + 1] * T(k - i + 1);
          }
          if (i <= k)
          {
-            acc += S0[i] * u[k - i];
+            acc = acc + S0[i] * u[k - i];
          }
       }
-      const T next = -acc / (S2[0] * T(k + 2) * T(k + 1));
+      const N next = -acc / (S2[0] * T(T(k + 2) * T(k + 1)));
       u.push_back(next);
-      value += next;
-      dvalue += T(k + 2) * next;
-      if (k > 8 && abs(next) <= tools::epsilon<T>() * abs(value) / 4 && abs(u[k + 1]) <= tools::epsilon<T>() * abs(value) / 4)
+      value = value + next;
+      dvalue = dvalue + next * T(k + 2);
+      // Both sums must have converged: near a singular point the terms fall only by about half per order, and the
+      // derivative's terms carry an extra factor k, so a test on the value alone leaves it tens of ε short.
+      const T v = tol * abs(leading(value));
+      const T dv = tol * abs(leading(dvalue));
+      if (k > 8 && abs(leading(next)) <= v && abs(leading(u[k + 1])) <= v && T(k + 2) * abs(leading(next)) <= dv && T(k + 1) * abs(leading(u[k + 1])) <= dv)
       {
          break;
       }
    }
    *R = value;
-   *Rd = dvalue / h;
+   *Rd = dvalue / H;
 }
 
 // The next point from a toward b: inside half the radius of convergence and, so that the series does not
@@ -307,16 +430,17 @@ T taylor_next(int sigma, const T& wavelength, const T& a, const T& b)
 
 // Continue (w, w') from a to b by Taylor steps. With σ = 1 and c2 = ±c² this is the prolate radial equation
 // (x = ξ > 1) and also the angular one (x = η, |η| < 1); with σ = -1 and c2 = c² it is the oblate radial equation.
-template <class T>
-void taylor_continue(const T& lambda, unsigned m, int sigma, const T& c2, T a, const T& b, T* R, T* Rd)
+template <class T, class N>
+void taylor_continue(const N& lambda, unsigned m, int sigma, const N& c2, T a, const T& b, N* R, N* Rd, const N& lambda_lo = N(0))
 {
    BOOST_MATH_STD_USING
-   const T wavelength = 1 / sqrt((std::max)(T(abs(c2)), T(abs(lambda))) + 1);
-   std::vector<T> u;
+   // In double length the series may grow by e^4 before it cancels.
+   const T wavelength = (std::is_same<N, T>::value ? T(1) : T(4)) / sqrt((std::max)(T(abs(leading(c2))), T(abs(leading(lambda)))) + 1);
+   std::vector<N> u;
    while (a != b)
    {
       const T next = taylor_next(sigma, wavelength, a, b);
-      taylor_step(lambda, m, sigma, c2, a, T(next - a), R, Rd, u);
+      taylor_step(lambda, m, sigma, c2, a, T(next - a), R, Rd, u, lambda_lo);
       a = next;
    }
 }
@@ -404,11 +528,11 @@ T legendre_series(unsigned m, unsigned p, const std::vector<T>& d, const T& eta,
 // integrated outward from η = 0, where the solution is dominant for the functions whose Legendre
 // series cancels there (oblate, large c).
 template <class T>
-T angular_from_origin(const T& lambda, unsigned m, unsigned p, const T& s, const T& eta, T* derivative)
+T angular_from_origin(const T& lambda, unsigned m, unsigned p, const T& s, const T& eta, T* derivative, const T& lambda_lo = T(0))
 {
    T w = p == 0 ? T(1) : T(0);
    T wd = p == 0 ? T(0) : T(1);
-   taylor_continue(lambda, m, 1, s, T(0), eta, &w, &wd);
+   taylor_continue(lambda, m, 1, s, T(0), eta, &w, &wd, lambda_lo);
    *derivative = wd;
    return w;
 }
@@ -454,27 +578,44 @@ coefficients<T> compute_coefficients(unsigned n, unsigned m, const T& s, const P
       // Build d from d[match] = 1 with ratios that are stable in their direction: the continued fraction
       // from the top for j > match and from the bottom for j < match. Matching at n - m and then again at
       // the largest |d_k| keeps both recurrences away from the side where the solution is subdominant.
+      // For large c the denominators β_k - λ + ... are small differences of terms of size c², so once the
+      // eigenvalue's low part is known the ratios are recomputed in double length (with λ = x + λ_lo), which
+      // keeps the low-order d_k to full relative accuracy.
+      bool precise = false;
+      auto ratio_step = [&](unsigned k, const twofold<T>& previous, bool upward) {
+         if (!precise)
+         {
+            return twofold<T>{ upward ? T(-gamma(m, k, s) / (beta(m, k, s) - x + alpha(m, k, s) * previous.hi))
+                                      : T(-alpha(m, k, s) / (beta(m, k, s) - x + gamma(m, k, s) * previous.hi)), T(0) };
+         }
+         twofold<T> a;
+         twofold<T> b;
+         twofold<T> g;
+         recurrence_twofold(m, k, s, &a, &b, &g);
+         const twofold<T> denom = b + twofold<T>{ T(-x), T(-result.lambda_lo) } + (upward ? a : g) * previous;
+         return -(upward ? g : a) / denom;
+      };
       auto build = [&](std::size_t match) {
          d.assign(size, T(0));
          d[match] = 1;
-         T ratio = 0;
+         twofold<T> ratio = { T(0), T(0) };
          std::vector<T> rho(size, T(0));
          for (std::size_t j = size - 1; j > match; --j)
          {
             const unsigned k = p + 2 * static_cast<unsigned>(j);
-            ratio = -gamma(m, k, s) / (beta(m, k, s) - x + alpha(m, k, s) * ratio);
-            rho[j] = ratio;  // d_k / d_{k-2}
+            ratio = ratio_step(k, ratio, true);
+            rho[j] = ratio.hi + ratio.lo;  // d_k / d_{k-2}
          }
          for (std::size_t j = match + 1; j < size; ++j)
          {
             d[j] = d[j - 1] * rho[j];
          }
-         ratio = 0;
+         ratio = { T(0), T(0) };
          for (std::size_t j = 0; j < match; ++j)
          {
             const unsigned k = p + 2 * static_cast<unsigned>(j);
-            ratio = -alpha(m, k, s) / (beta(m, k, s) - x + gamma(m, k, s) * ratio);
-            rho[j] = ratio;  // d_k / d_{k+2}
+            ratio = ratio_step(k, ratio, false);
+            rho[j] = ratio.hi + ratio.lo;  // d_k / d_{k+2}
          }
          for (std::size_t j = match; j > 0; --j)
          {
@@ -490,9 +631,11 @@ coefficients<T> compute_coefficients(unsigned n, unsigned m, const T& s, const P
             peak = j;
          }
       }
-      if (peak != (r - p) / 2)
+      std::size_t match = (r - p) / 2;
+      if (peak != match)
       {
-         build(peak);
+         match = peak;
+         build(match);
       }
       T dmax = 0;
       for (const T& v : d)
@@ -505,6 +648,12 @@ coefficients<T> compute_coefficients(unsigned n, unsigned m, const T& s, const P
          if (top > 100000)
          {
             policies::raise_evaluation_error<T>(function, "Expansion coefficients failed to converge for c^2 = %1%", s, pol);
+         }
+         result.lambda_lo = eigenvalue_low_part(m, r, p, top, s, result.lambda);
+         if (normalize)
+         {
+            precise = true;
+            build(match);
          }
          break;
       }
@@ -578,11 +727,11 @@ coefficients<T> compute_coefficients(unsigned n, unsigned m, const T& s, const P
 //   2(k+1)(k+m+1) e_{k+1} = (λ - m(m+1) - s - k(k-1) - 2(m+1)k) e_k - 2s e_{k-1} - s e_{k-2}.
 // Returns the solution and its derivative at η = 1 + t, t <= 0.
 template <class T>
-T angular_near_one(const T& lambda, unsigned m, const T& s, const T& t, T* derivative)
+T angular_near_one(const T& lambda, unsigned m, const T& s, const T& t, T* derivative, const T& lambda_lo = T(0))
 {
    BOOST_MATH_STD_USING
    const T mm = T(m);
-   const T shift = lambda - mm * (mm + 1) - s;
+   const T shift = T(lambda - mm * (mm + 1) - s) + lambda_lo;
    if (t == 0)
    {
       // Ps(1) for m = 0 (the only case with a nonzero value there), with g'(1) = e_1.
@@ -675,23 +824,23 @@ T angular(const coefficients<T>& co, const T& eta, T* derivative, const Policy& 
    {
       // The power series at η = 1 up to 1 - h0, then integration.
       const T h0 = (std::min)(T(0.5), T(1 / (2 * sqrt((std::max)(co.s, T(abs(co.lambda)))))));
-      us = angular_near_one(co.lambda, co.m, co.s, T(-h0), &usd);
+      us = angular_near_one(co.lambda, co.m, co.s, T(-h0), &usd, co.lambda_lo);
       xs = 1 - h0;
       if (x < xs)
       {
-         taylor_continue(co.lambda, co.m, 1, co.s, xs, x, &us, &usd);
+         taylor_continue(co.lambda, co.m, 1, co.s, xs, x, &us, &usd, co.lambda_lo);
          xs = x;
          u = us;
          ud = usd;
       }
       else
       {
-         u = angular_near_one(co.lambda, co.m, co.s, T(x - 1), &ud);
+         u = angular_near_one(co.lambda, co.m, co.s, T(x - 1), &ud, co.lambda_lo);
       }
    }
    else
    {
-      us = u = angular_from_origin(co.lambda, co.m, co.p, co.s, x, &ud);
+      us = u = angular_from_origin(co.lambda, co.m, co.p, co.s, x, &ud, co.lambda_lo);
       usd = ud;
    }
    // Move toward the region where the series is accurate and match there.
@@ -700,7 +849,7 @@ T angular(const coefficients<T>& co, const T& eta, T* derivative, const Policy& 
    {
       // Toward where the series converges without cancellation: η = 0 for prolate, η = 1 for oblate functions.
       const T next = co.s > 0 && xs > 0 ? T(xs * 3 / 4) : T(xs + (1 - xs) / 4);
-      taylor_continue(co.lambda, co.m, 1, co.s, xs, next, &us, &usd);
+      taylor_continue(co.lambda, co.m, 1, co.s, xs, next, &us, &usd, co.lambda_lo);
       xs = next;
       T Sd;
       T Sa;
@@ -746,12 +895,12 @@ T phase(const T& c, const T& x, const T& tau, T* z_lo)
       const T a = x - 1;
       const T s = x + 1;
       const T s_lo = (x - (s - 1)) + (1 - (s - (s - 1)));
-      q = a * s;
+      q = fma(a, s, T(0));
       q_lo = fma(a, s, -q) + a * s_lo;
    }
    else
    {
-      const T p = x * x;
+      const T p = fma(x, x, T(0));
       const T p_lo = fma(x, x, -p);
       q = p - tau;
       const T b = q - p;
@@ -759,7 +908,7 @@ T phase(const T& c, const T& x, const T& tau, T* z_lo)
    }
    const T root = sqrt(q);
    const T root_lo = (fma(-root, root, q) + q_lo) / (2 * root);
-   const T z = c * root;
+   const T z = fma(c, root, T(0));
    *z_lo = fma(c, root, -z) + c * root_lo;
    return z;
 }
@@ -842,7 +991,7 @@ T oblate_radial_1(const coefficients<T>& co, const T& c, const T& xi, T* derivat
    const unsigned r = co.n - co.m;
    const std::size_t size = co.d.size();
    const std::vector<T> F = factorial_ratios<T>(m, r, p, size);
-   const T z = c * xi;
+   const T z = fma(c, xi, T(0));
    std::vector<T> j = sph_bessel_j_all(m + p + 2 * static_cast<unsigned>(size - 1) + 2, z);
    shift_phase(j, z, T(fma(c, xi, -z)));
    T zm = 1;           // z^m
@@ -1001,7 +1150,7 @@ bool neumann_radial_2(const coefficients<T>& co, const T& c, const T& xi, T* val
    const T sigma = co.s > 0 ? T(1) : T(-1);
    const std::size_t size = co.d.size();
    const std::vector<T> F = factorial_ratios<T>(m, r, p, size);
-   const T z = c * xi;
+   const T z = fma(c, xi, T(0));
    const unsigned L = m + p + 2 * static_cast<unsigned>(size - 1) + 2;
    // y_l(z) by forward recurrence, which is stable; stop before overflow.
    std::vector<T> y(L + 1, T(0));
@@ -1233,6 +1382,33 @@ T radial_2(const coefficients<T>& co, const T& c, const T& xi, bool oblate, T* d
    // R^(2): from the Neumann series or the asymptotic expansion, each at the nearest point where it converges,
    // whichever promises the smaller error (its cancellation plus the integration steps back to ξ); then
    // integrated inward.
+   if (!oblate && c > 8 && xi - 1 < T(1) / 8)
+   {
+      // The integration below leaves a few ε times R1, from the start value and from each step, which its
+      // rescale cannot remove; near ξ = 1, where R1 is several times R2, that is far outside the conditioning
+      // in ξ - 1. So, as for the eigenvalue, the amplifying part runs in double length, from where the
+      // asymptotic series is good to about ε of the amplitude; it adds no multiple of R2, so needs no rescale.
+      T a = (std::min)(T(1 + c / 8), T(4));
+      T A2;
+      T A2d;
+      T amplification;
+      for (unsigned attempt = 0; !radial_asymptotic(co, c, a, &A2, &A2d, &amplification); ++attempt)
+      {
+         if (attempt == 200)
+         {
+            return policies::raise_evaluation_error<T>(function, "Asymptotic expansion failed to converge at xi = %1%", xi, pol);
+         }
+         a = 1 + 3 * (a - 1) / 2;
+      }
+      twofold<T> R = A2;
+      twofold<T> Rd = A2d;
+      taylor_continue(twofold<T>(co.lambda, co.lambda_lo), co.m, 1, twofold<T>(c) * twofold<T>(c), a, xi, &R, &Rd);
+      if (derivative)
+      {
+         *derivative = Rd.hi + Rd.lo;
+      }
+      return R.hi + R.lo;
+   }
    const T wavenumber = sqrt((std::max)(T(c * c), T(abs(co.lambda))) + 1);
    auto steps = [&](const T& from) {
       return abs(from - xi) * wavenumber + (oblate ? T(0) : T(log2((from - 1) / (xi - 1))));
@@ -1279,7 +1455,7 @@ T radial_2(const coefficients<T>& co, const T& c, const T& xi, bool oblate, T* d
    }
    if (start != xi)
    {
-      taylor_continue(co.lambda, co.m, oblate ? -1 : 1, T(c * c), start, xi, &R2, &R2d);
+      taylor_continue(co.lambda, co.m, oblate ? -1 : 1, T(c * c), start, xi, &R2, &R2d, co.lambda_lo);
       // The integration's rounding errors add α R1 + β R2. Since the Wronskian of R1 with itself vanishes,
       // the computed W(R1, R2) is exactly (1 + β) times 1/(c(ξ² ∓ 1)), so dividing by it removes β; α R1 is
       // what remains, and it shrinks wherever R2 dominates (toward ξ = 1 for prolate functions).
@@ -1371,7 +1547,7 @@ void gauss_legendre(unsigned n, std::vector<T>& x, std::vector<T>& w)
 // exponentially small Δ = λ_o - λ_e. With f = R2_n and g the first-kind function of the partner, the radial
 // equation gives d/dξ[(ξ²+1) W(f, g)] = (λ_g - λ_f) f g, and W vanishes at infinity, where f and g have the
 // same phase, so the coefficient is -Δ ∫_0^∞ f g dξ divided by g(0) or g'(0). Δ comes from the same identity for
-// the angular functions on [0, 1] (Herring's formula), Δ = Ps_e(0) Ps_o'(0) / ∫_0^1 Ps_e Ps_o dη, whose values at 0
+// the angular functions on [0, 1], Δ = Ps_e(0) Ps_o'(0) / ∫_0^1 Ps_e Ps_o dη, whose values at 0
 // are computed to full relative accuracy. ∫_0^X f g is integrated exactly along shared Taylor steps from ξ = 0
 // (where f starts from the matched coefficient, whose error hardly affects the integral), and the tail from
 // the asymptotic expansions of both functions.
@@ -1386,7 +1562,7 @@ bool oblate_small_coefficient(const coefficients<T>& co, const T& c, const T& ex
    const coefficients<T> partner = compute_coefficients(even ? n + 1 : n - 1, m, co.s, pol, function);
    const coefficients<T>& ce = even ? co : partner;
    const coefficients<T>& cpo = even ? partner : co;
-   // Δ by Herring's formula.
+   // Δ from the angular functions.
    T Se_d;
    const T Se = angular(ce, T(0), &Se_d, pol, function);
    T So_d;
@@ -1462,9 +1638,9 @@ bool oblate_small_coefficient(const coefficients<T>& co, const T& c, const T& ex
    {
       const T next = taylor_next(-1, wavelength, a, X);
       const T h = next - a;
-      taylor_step(co.lambda, m, -1, c2, a, h, &ue, &ued, ce_u);
-      taylor_step(co.lambda, m, -1, c2, a, h, &uo, &uod, co_u);
-      taylor_step(partner.lambda, m, -1, c2, a, h, &g, &gd, g_u);
+      taylor_step(co.lambda, m, -1, c2, a, h, &ue, &ued, ce_u, co.lambda_lo);
+      taylor_step(co.lambda, m, -1, c2, a, h, &uo, &uod, co_u, co.lambda_lo);
+      taylor_step(partner.lambda, m, -1, c2, a, h, &g, &gd, g_u, partner.lambda_lo);
       K += h * product(ce_u, g_u);
       M += h * product(co_u, g_u);
       a = next;
@@ -1593,32 +1769,33 @@ bool oblate_radial_2_near_zero(const coefficients<T>& co, const T& c, const T& x
    const T R0 = radial_2(co, c, xi0, true, &R0d, pol, function);
    const T c2 = c * c;
    T ue = 1, ued = 0, uo = 0, uod = 1;
-   taylor_continue(co.lambda, co.m, -1, c2, T(0), xi, &ue, &ued);
-   taylor_continue(co.lambda, co.m, -1, c2, T(0), xi, &uo, &uod);
+   taylor_continue(co.lambda, co.m, -1, c2, T(0), xi, &ue, &ued, co.lambda_lo);
+   taylor_continue(co.lambda, co.m, -1, c2, T(0), xi, &uo, &uod, co.lambda_lo);
    T ve = ue, ved = ued, vo = uo, vod = uod;
-   taylor_continue(co.lambda, co.m, -1, c2, xi, xi0, &ve, &ved);
-   taylor_continue(co.lambda, co.m, -1, c2, xi, xi0, &vo, &vod);
+   taylor_continue(co.lambda, co.m, -1, c2, xi, xi0, &ve, &ved, co.lambda_lo);
+   taylor_continue(co.lambda, co.m, -1, c2, xi, xi0, &vo, &vod, co.lambda_lo);
    const T w = xi0 * xi0 + 1;
    T A = w * (R0 * vod - R0d * vo);
    T B = w * (R0d * ve - R0 * ved);
-   // R2 at ξ0 is accurate to some tens of ε, so the matched coefficient is known to about that relative to the scale.
-   const T noise_A = 256 * tools::epsilon<T>() * w * (abs(R0 * vod) + abs(R0d * vo));
-   const T noise_B = 256 * tools::epsilon<T>() * w * (abs(R0d * ve) + abs(R0 * ved));
+   // The size of the terms that make up each matched coefficient.
+   const T scale_A = w * (abs(R0 * vod) + abs(R0d * vo));
+   const T scale_B = w * (abs(R0d * ve) + abs(R0 * ved));
+   // The coefficient fixed by the Wronskian with R1 is exact. The other is exponentially small for large c and
+   // cancels in matching; when it is well below the size of its terms, it comes from the eigenvalue splitting
+   // instead (oblate_small_coefficient). Otherwise the inward integration is accurate (to a few ε where the
+   // splitting formula is not, at small c), and the caller uses it.
+   const T rough = co.p == 0 ? A : B;
+   if (!(abs(rough) < (co.p == 0 ? scale_A : scale_B) / 16))
+   {
+      return false;
+   }
    T R1d;
    const T R1 = oblate_radial_1(co, c, T(0), &R1d);
-   // The coefficient fixed by the Wronskian with R1 is exact; the other is exponentially small for large c,
-   // and matching determines it only to about an ulp of the scale at ξ0. Unless it is well above that, it
-   // comes from the eigenvalue splitting instead (oblate_small_coefficient).
    const T exact = co.p == 0 ? T(1 / (c * R1)) : T(-1 / (c * R1d));
-   const T rough = co.p == 0 ? A : B;
-   const T noise = co.p == 0 ? noise_A : noise_B;
-   T small = rough;
-   if (abs(rough) < noise / (64 * tools::epsilon<T>()))
+   T small;
+   if (!oblate_small_coefficient(co, c, exact, &small, pol, function))
    {
-      if (!oblate_small_coefficient(co, c, exact, &small, pol, function))
-      {
-         return false;
-      }
+      return false;
    }
    if (co.p == 0)
    {
@@ -1636,11 +1813,9 @@ bool oblate_radial_2_near_zero(const coefficients<T>& co, const T& c, const T& x
 }
 
 template <class T, class Policy>
-T radial(unsigned n, unsigned m, const T& c, const T& xi, int kind, bool oblate, T* derivative, const Policy& pol, const char* function)
+T radial(const coefficients<T>& co, const T& c, const T& xi, int kind, bool oblate, T* derivative, const Policy& pol, const char* function)
 {
    BOOST_MATH_STD_USING
-   const T s = oblate ? T(-c * c) : T(c * c);
-   coefficients<T> co = compute_coefficients(n, m, s, pol, function);
    if (kind == 1)
    {
       return oblate ? oblate_radial_1(co, c, xi, derivative) : prolate_radial_1(co, c, xi, derivative);
@@ -1661,59 +1836,107 @@ T radial(unsigned n, unsigned m, const T& c, const T& xi, int kind, bool oblate,
 
 enum class quantity { eigenvalue, angular, radial_1, radial_2 };
 
-template <class T, class Policy>
-T evaluate(quantity what, bool oblate, unsigned n, unsigned m, const T& c, const T& x, T* derivative, const Policy& pol, const char* function)
+// DLMF's λ_n^m(γ²) (30.3); the recurrence uses Flammer's, which is λ + γ².
+template <class T>
+T dlmf_eigenvalue(const coefficients<T>& co)
 {
-   BOOST_MATH_STD_USING
-   if (n < m)
+   const twofold<T> t = twofold_sum(co.lambda, T(-co.s));
+   return t.hi + T(t.lo + co.lambda_lo);
+}
+
+// The eigenvalue and coefficients of one (n, m, c), computed once, and the functions that use them.
+template <class T, class Policy>
+class wave
+{
+public:
+   // Everything depends on c², except that R^(1) and R^(2) change by (-1)^n and (-1)^(n+1) with the sign of c.
+   wave(unsigned n, unsigned m, const T& c, bool oblate, const char* function)
+      : c_(c < 0 ? T(-c) : c), oblate_(oblate), flip_1_(c < 0 && n % 2 == 1), flip_2_(c < 0 && n % 2 == 0)
    {
-      return policies::raise_domain_error<T>(function, "Degree n must be >= order m, but got n = %1%", T(n), pol);
-   }
-   if (!(BOOST_MATH_NAMESPACE::isfinite)(c) || c < 0)
-   {
-      return policies::raise_domain_error<T>(function, "Spheroidal parameter c must be finite and >= 0, but got c = %1%", c, pol);
-   }
-   const T s = oblate ? T(-c * c) : T(c * c);
-   if (what == quantity::eigenvalue)
-   {
-      // DLMF's λ_n^m(γ²) (30.3); the recurrence uses Flammer's, which is λ + γ².
-      return compute_coefficients(n, m, s, pol, function, false).lambda - s;
-   }
-   if (!(BOOST_MATH_NAMESPACE::isfinite)(x))
-   {
-      return policies::raise_domain_error<T>(function, "Argument must be finite, but got %1%", x, pol);
-   }
-   if (what == quantity::angular)
-   {
-      if (abs(x) > 1)
+      if (n < m)
       {
-         return policies::raise_domain_error<T>(function, "Angular argument must be in [-1, 1], but got eta = %1%", x, pol);
+         invalid_ = policies::raise_domain_error<T>(function, "Degree n must be >= order m, but got n = %1%", T(n), Policy());
       }
-      return angular(compute_coefficients(n, m, s, pol, function), x, derivative, pol, function);
+      else if (!(BOOST_MATH_NAMESPACE::isfinite)(c))
+      {
+         invalid_ = policies::raise_domain_error<T>(function, "Spheroidal parameter c must be finite, but got c = %1%", c, Policy());
+      }
+      else
+      {
+         valid_ = true;
+         co_ = compute_coefficients(n, m, oblate ? T(-c * c) : T(c * c), Policy(), function);
+      }
    }
-   if (c == 0)
+
+   T operator()(quantity what, const T& x, T* derivative, const char* function) const
    {
-      return policies::raise_domain_error<T>(function, "Radial functions need c > 0, but got c = %1%", c, pol);
+      BOOST_MATH_STD_USING
+      const Policy pol;
+      if (!valid_)
+      {
+         return invalid_;
+      }
+      if (what == quantity::eigenvalue)
+      {
+         return dlmf_eigenvalue(co_);
+      }
+      if (!(BOOST_MATH_NAMESPACE::isfinite)(x))
+      {
+         return policies::raise_domain_error<T>(function, "Argument must be finite, but got %1%", x, pol);
+      }
+      if (what == quantity::angular)
+      {
+         if (abs(x) > 1)
+         {
+            return policies::raise_domain_error<T>(function, "Angular argument must be in [-1, 1], but got eta = %1%", x, pol);
+         }
+         return angular(co_, x, derivative, pol, function);
+      }
+      if (c_ == 0)
+      {
+         return policies::raise_domain_error<T>(function, "Radial functions need c > 0, but got c = %1%", c_, pol);
+      }
+      if (oblate_ ? x < 0 : x < 1)
+      {
+         return policies::raise_domain_error<T>(function, oblate_ ? "Oblate radial argument must be >= 0, but got xi = %1%" : "Prolate radial argument must be >= 1, but got xi = %1%", x, pol);
+      }
+      if (what == quantity::radial_2 && !oblate_ && x == 1)
+      {
+         return policies::raise_overflow_error<T>(function, nullptr, pol);
+      }
+      T d;
+      const T value = radial(co_, c_, x, what == quantity::radial_2 ? 2 : 1, oblate_, &d, pol, function);
+      if (!(BOOST_MATH_NAMESPACE::isfinite)(value) || (derivative && !(BOOST_MATH_NAMESPACE::isfinite)(d)))
+      {
+         return policies::raise_overflow_error<T>(function, nullptr, pol);
+      }
+      const bool flip = what == quantity::radial_2 ? flip_2_ : flip_1_;
+      if (derivative)
+      {
+         *derivative = flip ? T(-d) : d;
+      }
+      return flip ? T(-value) : value;
    }
-   if (oblate ? x < 0 : x < 1)
+
+private:
+   coefficients<T> co_;
+   T c_;
+   bool oblate_;
+   bool flip_1_;
+   bool flip_2_;
+   bool valid_ = false;
+   T invalid_ = 0;
+};
+
+template <class T, class Policy>
+T evaluate(quantity what, bool oblate, unsigned n, unsigned m, const T& c, const T& x, T* derivative, const Policy&, const char* function)
+{
+   if (what == quantity::eigenvalue && n >= m && (BOOST_MATH_NAMESPACE::isfinite)(c))
    {
-      return policies::raise_domain_error<T>(function, oblate ? "Oblate radial argument must be >= 0, but got xi = %1%" : "Prolate radial argument must be >= 1, but got xi = %1%", x, pol);
+      // Without the coefficients' normalization, which the eigenvalue does not need.
+      return dlmf_eigenvalue(compute_coefficients(n, m, oblate ? T(-c * c) : T(c * c), Policy(), function, false));
    }
-   if (what == quantity::radial_2 && !oblate && x == 1)
-   {
-      return policies::raise_overflow_error<T>(function, nullptr, pol);
-   }
-   T d;
-   const T value = radial(n, m, c, x, what == quantity::radial_2 ? 2 : 1, oblate, &d, pol, function);
-   if (!(BOOST_MATH_NAMESPACE::isfinite)(value) || (derivative && !(BOOST_MATH_NAMESPACE::isfinite)(d)))
-   {
-      return policies::raise_overflow_error<T>(function, nullptr, pol);
-   }
-   if (derivative)
-   {
-      *derivative = d;
-   }
-   return value;
+   return wave<T, Policy>(n, m, c, oblate, function)(what, x, derivative, function);
 }
 
 template <class T1, class T2, class Policy>
@@ -1732,7 +1955,69 @@ inline typename tools::promote_args<T1, T2>::type function_api(quantity what, bo
    return policies::checked_narrowing_cast<result_type, forwarding_policy>(value, function);
 }
 
+// The public classes' arguments and results, promoted and narrowed as for the free functions.
+template <class Real, class Policy, bool Oblate>
+class wave_function
+{
+   typedef typename policies::evaluation<Real, Policy>::type value_type;
+   typedef typename policies::normalise<Policy, policies::promote_float<false>, policies::promote_double<false>>::type forwarding_policy;
+
+public:
+   Real eigenvalue() const
+   {
+      return get(quantity::eigenvalue, Real(0), nullptr, Oblate ? "boost::math::oblate_spheroidal<%1%>::eigenvalue()" : "boost::math::prolate_spheroidal<%1%>::eigenvalue()");
+   }
+   Real angular(Real eta, Real* derivative = nullptr) const
+   {
+      return get(quantity::angular, eta, derivative, Oblate ? "boost::math::oblate_spheroidal<%1%>::angular(%1%)" : "boost::math::prolate_spheroidal<%1%>::angular(%1%)");
+   }
+   Real radial_1(Real xi, Real* derivative = nullptr) const
+   {
+      return get(quantity::radial_1, xi, derivative, Oblate ? "boost::math::oblate_spheroidal<%1%>::radial_1(%1%)" : "boost::math::prolate_spheroidal<%1%>::radial_1(%1%)");
+   }
+   Real radial_2(Real xi, Real* derivative = nullptr) const
+   {
+      return get(quantity::radial_2, xi, derivative, Oblate ? "boost::math::oblate_spheroidal<%1%>::radial_2(%1%)" : "boost::math::prolate_spheroidal<%1%>::radial_2(%1%)");
+   }
+
+protected:
+   wave_function(unsigned n, unsigned m, Real c)
+      : w_(n, m, static_cast<value_type>(c), Oblate, Oblate ? "boost::math::oblate_spheroidal<%1%>::oblate_spheroidal(unsigned, unsigned, %1%)" : "boost::math::prolate_spheroidal<%1%>::prolate_spheroidal(unsigned, unsigned, %1%)")
+   {
+   }
+
+private:
+   Real get(quantity what, Real x, Real* derivative, const char* function) const
+   {
+      value_type d = 0;
+      const value_type value = w_(what, static_cast<value_type>(x), derivative ? &d : nullptr, function);
+      if (derivative)
+      {
+         *derivative = policies::checked_narrowing_cast<Real, forwarding_policy>(d, function);
+      }
+      return policies::checked_narrowing_cast<Real, forwarding_policy>(value, function);
+   }
+
+   wave<value_type, forwarding_policy> w_;
+};
+
 }} // namespace detail::spheroidal
+
+// The functions of one (n, m, c) at many arguments. The eigenvalue and expansion coefficients, most of the
+// cost of each free function below, are computed once, by the constructor.
+BOOST_MATH_EXPORT template <class Real, class Policy = policies::policy<>>
+class prolate_spheroidal : public detail::spheroidal::wave_function<Real, Policy, false>
+{
+public:
+   prolate_spheroidal(unsigned n, unsigned m, Real c) : detail::spheroidal::wave_function<Real, Policy, false>(n, m, c) {}
+};
+
+BOOST_MATH_EXPORT template <class Real, class Policy = policies::policy<>>
+class oblate_spheroidal : public detail::spheroidal::wave_function<Real, Policy, true>
+{
+public:
+   oblate_spheroidal(unsigned n, unsigned m, Real c) : detail::spheroidal::wave_function<Real, Policy, true>(n, m, c) {}
+};
 
 // Each public function, with and without a policy; the derivative with respect to the argument is
 // returned through the optional pointer, at little extra cost.

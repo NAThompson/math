@@ -65,6 +65,8 @@ static const reference references[] = {
    { true, quantity::radial_2, 0, 0, 1, 1.5, 7.333899022759524357839102e-02, 4.816878757620160272659790e-01, -5.032746163896011378212865e-01 },
    { true, quantity::radial_1, 2, 1, 2, 0.3, 6.930740971908811994347347e-02, 2.377053130364953068285531e-01, 5.643031623269601331225632e-02 },
    { true, quantity::radial_2, 2, 1, 2, 0.3, -1.287222533961435274543498e+00, 2.203746490691256765008222e+00, -4.691307523266388236105012e+00 },
+   { true, quantity::radial_1, 2, 0, 0.7, 0.95, 3.878022880175932810424609e-02, 5.651032260097955325033789e-02, 5.167160464494143910608470e-02 },
+   { true, quantity::radial_2, 2, 0, 0.7, 0.95, -5.781080058730265370821786e+00, 1.093858901509161295786766e+01, -2.704013571938744380360122e+01 },
    { true, quantity::radial_1, 5, 5, 50, 0.01, 1.930923562252944692444345e-02, -3.988907317916263401105854e-01, -3.728295103268609793451629e+01 },
    { true, quantity::radial_2, 5, 5, 50, 0.01, 9.074510627557964863375712e-03, 8.482087191474758169766300e-01, -1.754209550323255092280851e+01 },
    { true, quantity::radial_1, 7, 5, 50, 0.2, -1.066866281374618564260156e-02, -7.772407903200453730121756e-01, 1.922478947990172848942041e+01 },
@@ -91,6 +93,7 @@ static const eigen_reference eigenvalues[] = {
    { true, 0, 0, 1, 6.513976005297309105236276e-01 },
    { true, 0, 0, 20, 3.898682560262838930740020e+01 },
    { true, 0, 0, 50, 9.899489701803371781482141e+01 },
+   { true, 2, 0, 0.7, 6.235825497827167684617870e+00 },
    { true, 2, 1, 2, 8.222747333357629357660755e+00 },
    { true, 3, 0, 8, 4.238216690599335638621647e+01 },
    { true, 3, 2, 8, 4.463435700437767113893938e+01 },
@@ -176,6 +179,20 @@ void test_identities()
 {
    using std::abs;
    const Real eps = std::numeric_limits<Real>::epsilon();
+   // A closed form (Mathematica): R^(1)_11(π/2, 3/2) = 2 sqrt(2/5)/π.
+   CHECK_RELATIVE_ERROR(Real(0.40263369683589628028982024114197150961L),
+                        prolate_spheroidal_radial_1(1u, 1u, boost::math::constants::half_pi<Real>(), Real(1.5)), 8 * eps);
+   // More generally, for m = 1 and γ = nπ/2 the eigenvalue is 0 and R^(1) = sin(γ(x - 1))/(γ sqrt(x² - 1)).
+   for (unsigned n = 1; n <= 8; ++n)
+   {
+      const Real g = n * boost::math::constants::half_pi<Real>();
+      CHECK_ABSOLUTE_ERROR(Real(0), prolate_spheroidal_eigenvalue(n, 1u, g), 8 * eps * (n * (n + 1) + g * g));
+      for (Real x : { Real(1.2), Real(1.5), Real(2.3), Real(3.7), Real(7.25) })
+      {
+         const Real amplitude = 1 / (g * sqrt(x * x - 1));
+         CHECK_ABSOLUTE_ERROR(sin(g * (x - 1)) * amplitude, prolate_spheroidal_radial_1(n, 1u, g, x), 8 * eps * (1 + g * x) * amplitude);
+      }
+   }
    // c = 0 reduces the angular function to the Ferrers function (with the Condon-Shortley phase),
    // and both families agree there.
    for (unsigned m = 0; m < 4; ++m)
@@ -186,7 +203,21 @@ void test_identities()
          const Real P = boost::math::legendre_p(static_cast<int>(n), static_cast<int>(m), x);
          CHECK_ULP_CLOSE(P, prolate_spheroidal_angular(n, m, Real(0), x), 64);
          CHECK_ULP_CLOSE(P, oblate_spheroidal_angular(n, m, Real(0), x), 64);
-         CHECK_ABSOLUTE_ERROR(Real(n * (n + 1)), prolate_spheroidal_eigenvalue(n, m, Real(0)), 4 * eps * Real(n * (n + 1) + 1));
+      }
+   }
+   // λ_n^m(0) = n(n + 1) for both families.
+   for (unsigned n = 0; n <= 200; ++n)
+   {
+      for (unsigned m = 0; m <= n; m += 1 + n / 8)
+      {
+         if (n == 0)
+         {
+            CHECK_ABSOLUTE_ERROR(Real(0), prolate_spheroidal_eigenvalue(n, m, Real(0)), eps);
+            CHECK_ABSOLUTE_ERROR(Real(0), oblate_spheroidal_eigenvalue(n, m, Real(0)), eps);
+            continue;
+         }
+         CHECK_ULP_CLOSE(Real(n * (n + 1)), prolate_spheroidal_eigenvalue(n, m, Real(0)), 2);
+         CHECK_ULP_CLOSE(Real(n * (n + 1)), oblate_spheroidal_eigenvalue(n, m, Real(0)), 2);
       }
    }
    // Parity: Ps(-η) = (-1)^{n-m} Ps(η).
@@ -252,13 +283,46 @@ void test_identities()
 #endif
 }
 
+// Negative c: everything is even in c except R^(1) and R^(2), which change by (-1)^n and (-1)^(n+1).
+// The references are Mathematica's SpheroidalS1[3, 0, -10, 2] and SpheroidalS2[3, 0, -10, 2].
+template <class Real>
+void test_negative_c()
+{
+   const Real eps = std::numeric_limits<Real>::epsilon();
+   CHECK_RELATIVE_ERROR(Real(-0.055622567027685284053140519510746078547L), prolate_spheroidal_radial_1(3u, 0u, Real(-10), Real(2)), 8 * eps);
+   CHECK_RELATIVE_ERROR(Real(0.0068691526697690888886958973230446638095L), prolate_spheroidal_radial_2(3u, 0u, Real(-10), Real(2)), 8 * eps);
+   for (unsigned n = 0; n < 5; ++n)
+   {
+      for (unsigned m = 0; m <= n; ++m)
+      {
+         const Real s1 = n % 2 ? Real(-1) : Real(1);
+         for (Real c : { Real(0.5), Real(3), Real(12) })
+         {
+            CHECK_EQUAL(prolate_spheroidal_eigenvalue(n, m, -c), prolate_spheroidal_eigenvalue(n, m, c));
+            CHECK_EQUAL(oblate_spheroidal_eigenvalue(n, m, -c), oblate_spheroidal_eigenvalue(n, m, c));
+            CHECK_EQUAL(prolate_spheroidal_angular(n, m, -c, Real(0.3)), prolate_spheroidal_angular(n, m, c, Real(0.3)));
+            CHECK_EQUAL(oblate_spheroidal_angular(n, m, -c, Real(0.3)), oblate_spheroidal_angular(n, m, c, Real(0.3)));
+            Real d1, d2;
+            CHECK_EQUAL(prolate_spheroidal_radial_1(n, m, -c, Real(1.5), &d1), s1 * prolate_spheroidal_radial_1(n, m, c, Real(1.5), &d2));
+            CHECK_EQUAL(d1, s1 * d2);
+            CHECK_EQUAL(prolate_spheroidal_radial_2(n, m, -c, Real(1.5), &d1), -s1 * prolate_spheroidal_radial_2(n, m, c, Real(1.5), &d2));
+            CHECK_EQUAL(d1, -s1 * d2);
+            CHECK_EQUAL(oblate_spheroidal_radial_1(n, m, -c, Real(0.7), &d1), s1 * oblate_spheroidal_radial_1(n, m, c, Real(0.7), &d2));
+            CHECK_EQUAL(d1, s1 * d2);
+            CHECK_EQUAL(oblate_spheroidal_radial_2(n, m, -c, Real(0.7), &d1), -s1 * oblate_spheroidal_radial_2(n, m, c, Real(0.7), &d2));
+            CHECK_EQUAL(d1, -s1 * d2);
+         }
+      }
+   }
+}
+
 template <class Real>
 void test_domain()
 {
 #ifndef BOOST_MATH_NO_EXCEPTIONS
    const Real nan = std::numeric_limits<Real>::quiet_NaN();
    CHECK_THROW(prolate_spheroidal_eigenvalue(1u, 2u, Real(1)), std::domain_error);
-   CHECK_THROW(oblate_spheroidal_eigenvalue(2u, 1u, Real(-1)), std::domain_error);
+   CHECK_THROW(oblate_spheroidal_eigenvalue(2u, 1u, std::numeric_limits<Real>::infinity()), std::domain_error);
    CHECK_THROW(prolate_spheroidal_angular(2u, 1u, Real(1), Real(1.5)), std::domain_error);
    CHECK_THROW(oblate_spheroidal_angular(2u, 1u, Real(1), nan), std::domain_error);
    CHECK_THROW(prolate_spheroidal_radial_1(2u, 1u, Real(1), Real(0.5)), std::domain_error);
@@ -266,6 +330,98 @@ void test_domain()
    CHECK_THROW(prolate_spheroidal_radial_2(2u, 1u, Real(0), Real(2)), std::domain_error);
    CHECK_THROW(oblate_spheroidal_radial_1(2u, 1u, nan, Real(2)), std::domain_error);
 #endif
+}
+
+// The classes compute exactly what the free functions do, keeping the eigenvalue and coefficients.
+template <class Real>
+void test_classes()
+{
+   for (unsigned n : { 0u, 3u, 6u })
+   {
+      for (unsigned m : { 0u, 2u })
+      {
+         if (n < m)
+         {
+            continue;
+         }
+         for (Real c : { Real(0.5), Real(5), Real(30) })
+         {
+            const prolate_spheroidal<Real> p(n, m, c);
+            const oblate_spheroidal<Real> o(n, m, c);
+            CHECK_EQUAL(p.eigenvalue(), prolate_spheroidal_eigenvalue(n, m, c));
+            CHECK_EQUAL(o.eigenvalue(), oblate_spheroidal_eigenvalue(n, m, c));
+            for (Real x : { Real(0), Real(0.3), Real(0.9) })
+            {
+               Real d1;
+               Real d2;
+               CHECK_EQUAL(p.angular(x, &d1), prolate_spheroidal_angular(n, m, c, x, &d2));
+               CHECK_EQUAL(d1, d2);
+               CHECK_EQUAL(o.angular(x, &d1), oblate_spheroidal_angular(n, m, c, x, &d2));
+               CHECK_EQUAL(d1, d2);
+            }
+            for (Real x : { Real(0), Real(1.001), Real(2), Real(40) })
+            {
+               Real d1;
+               Real d2;
+               CHECK_EQUAL(o.radial_1(x, &d1), oblate_spheroidal_radial_1(n, m, c, x, &d2));
+               CHECK_EQUAL(d1, d2);
+               CHECK_EQUAL(o.radial_2(x, &d1), oblate_spheroidal_radial_2(n, m, c, x, &d2));
+               CHECK_EQUAL(d1, d2);
+               if (x > 1)
+               {
+                  CHECK_EQUAL(p.radial_1(x, &d1), prolate_spheroidal_radial_1(n, m, c, x, &d2));
+                  CHECK_EQUAL(d1, d2);
+                  CHECK_EQUAL(p.radial_2(x, &d1), prolate_spheroidal_radial_2(n, m, c, x, &d2));
+                  CHECK_EQUAL(d1, d2);
+               }
+            }
+         }
+      }
+   }
+#ifndef BOOST_MATH_NO_EXCEPTIONS
+   CHECK_THROW(prolate_spheroidal<Real>(1u, 2u, Real(1)), std::domain_error);
+   CHECK_THROW(oblate_spheroidal<Real>(2u, 1u, std::numeric_limits<Real>::quiet_NaN()), std::domain_error);
+   const prolate_spheroidal<Real> p(2u, 1u, Real(1));
+   CHECK_THROW(p.angular(Real(1.5)), std::domain_error);
+   CHECK_THROW(p.radial_1(Real(0.5)), std::domain_error);
+   CHECK_THROW(p.radial_2(Real(1)), std::overflow_error);
+   CHECK_THROW(prolate_spheroidal<Real>(2u, 1u, Real(0)).radial_2(Real(2)), std::domain_error);
+#endif
+}
+
+// Near ξ = 1 the Taylor steps toward the singular point converge slowly, and stopping on the value alone left
+// R2 and R2' about 10 ε off in opposite directions, which the Wronskian rescaling cannot see. Arb references.
+void test_near_singular_point()
+{
+   const double eps = std::numeric_limits<double>::epsilon();
+   double d;
+   const double R2 = prolate_spheroidal_radial_2(3u, 1u, 5.0, 1.0001, &d);
+   CHECK_RELATIVE_ERROR(-12.581952943451456391442664, R2, 6 * eps);
+   CHECK_RELATIVE_ERROR(62849.1918223624000866448690, d, 6 * eps);
+   // At large c, R2 near ξ = 1 is a small multiple of R1 (here |R1/R2| ≈ |(ξ - 1) R2'/R2| ≈ 14.6); integrating it
+   // in double alone left 202 ε. Arb reference at the double 1.001.
+   const double R2_far = prolate_spheroidal_radial_2(3u, 1u, 50.0, 1.001, &d);
+   CHECK_RELATIVE_ERROR(-6.9315252963593424326187200e-03, R2_far, 32 * eps);
+   CHECK_RELATIVE_ERROR(101.19873910969480014097099, d, 4 * eps);
+}
+
+// For large c, λ and the low-order d_k are small differences of terms of size c², which rounding λ to double
+// alone used to cost 17 ulps of λ, a bias of 8 ε in Ps near η = 0 and 1000 ε of R1(0). Arb references, at the
+// double arguments. Near η = 0 the oblate Ps is exponentially small and |c ∂Ps/∂c / Ps| ≈ 28 at c = 30, so a
+// few ε is within its conditioning in c.
+void test_large_c_cancellation()
+{
+   const double eps = std::numeric_limits<double>::epsilon();
+   CHECK_RELATIVE_ERROR(6.4154737735892829929038709e+01, oblate_spheroidal_eigenvalue(4u, 2u, 8.0), eps);
+   CHECK_RELATIVE_ERROR(-2.4507538474728953552860295e+03, prolate_spheroidal_eigenvalue(0u, 0u, 50.0), eps);
+   CHECK_RELATIVE_ERROR(4.0278198828989161359655196e+02, oblate_spheroidal_eigenvalue(12u, 2u, 20.0), eps);
+   CHECK_RELATIVE_ERROR(-1.5046404853466260994947109e-10, oblate_spheroidal_angular(2u, 0u, 30.0, 0.0), 8 * eps);
+   double d;
+   CHECK_RELATIVE_ERROR(-1.1193038415267354568982640e-09, oblate_spheroidal_angular(2u, 0u, 30.0, 0.1, &d), 8 * eps);
+   CHECK_RELATIVE_ERROR(-2.9931245822742510220603995e-08, d, 8 * eps);
+   CHECK_RELATIVE_ERROR(2.1336477926843118466947925e-02, oblate_spheroidal_radial_1(5u, 5u, 50.0, 0.0), 8 * eps);
+   oblate_spheroidal_radial_1(6u, 5u, 50.0, 0.0, &d);
+   CHECK_RELATIVE_ERROR(9.3736183022214202208846823e-01, d, 8 * eps);
 }
 
 #ifndef BOOST_MATH_STANDALONE
@@ -289,8 +445,14 @@ int main()
    test_references<double>();
    test_identities<float>();
    test_identities<double>();
+   test_negative_c<float>();
+   test_negative_c<double>();
    test_domain<float>();
    test_domain<double>();
+   test_classes<float>();
+   test_classes<double>();
+   test_near_singular_point();
+   test_large_c_cancellation();
 #ifndef BOOST_MATH_STANDALONE
    test_multiprecision();
 #endif

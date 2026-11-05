@@ -35,12 +35,39 @@
     template <class T1, class T2>
     ``__sf_result`` oblate_spheroidal_radial_2(unsigned n, unsigned m, T1 c, T2 xi, ``__sf_result``* derivative = nullptr);
 
+    // All of the above for one (n, m, c), at many arguments:
+    template <class Real, class Policy = policies::policy<>>
+    class prolate_spheroidal
+    {
+    public:
+        prolate_spheroidal(unsigned n, unsigned m, Real c);
+        Real eigenvalue() const;
+        Real angular(Real eta, Real* derivative = nullptr) const;
+        Real radial_1(Real xi, Real* derivative = nullptr) const;
+        Real radial_2(Real xi, Real* derivative = nullptr) const;
+    };
+    template <class Real, class Policy = policies::policy<>>
+    class oblate_spheroidal; // the same members
+
     }} // namespaces
 
 Each function also has an overload taking a trailing __Policy argument (after the derivative pointer).
 When `derivative` is not null it receives the derivative with respect to [eta] or [xi]; the two share the expensive
 part of the computation, so asking for both costs little more than the value alone. The derivatives are computed
 from forms that avoid the cancellation an automatic differentiation of the value would inherit near [xi] = 1.
+
+Most of the cost of each call, 15-30 [mu]s in double, is the eigenvalue and the expansion coefficients, which depend
+only on /n/, /m/ and /c/. The classes compute them once, in the constructor, and their members return exactly what
+the free functions do, so evaluating at many arguments is up to 20 times faster:
+
+    boost::math::prolate_spheroidal<double> f(4, 1, 16.0);
+    for (double xi : grid)
+    {
+        double d;
+        double R2 = f.radial_2(xi, &d);
+    }
+
+The members are `const` and an object may be shared between threads. Domain errors in /n/, /m/ or /c/ are raised by the constructor.
 
 [h4 Description]
 
@@ -83,7 +110,9 @@ The radial functions agree in all of these conventions.
 
 [h4 Domain]
 
-/n/ < /m/, /c/ < 0, |[eta]| > 1, [xi] < 1 (prolate) or [xi] < 0 (oblate), non-finite arguments,
+/c/ may be negative: the eigenvalues and angular functions depend only on /c/[super 2], and the radial functions of the first and
+second kinds are multiplied by (-1)[super /n/] and (-1)[super /n/+1] when the sign of /c/ changes, as in Mathematica.
+/n/ < /m/, |[eta]| > 1, [xi] < 1 (prolate) or [xi] < 0 (oblate), non-finite arguments,
 and /c/ = 0 for the radial functions are domain errors.
 The prolate radial functions of the second kind, and the derivative of the first kind for /m/ = 1, are infinite at [xi] = 1
 and raise an overflow error there, as does a request for the derivative of the angular function at [eta] = [plusminus]1 for /m/ = 1.
@@ -96,19 +125,19 @@ so that zeros of these oscillating functions do not dominate, are at most
 
 [table
 [[Function] [prolate, c <= 8] [prolate, c <= 50] [oblate, c <= 8] [oblate, c <= 50]]
-[[eigenvalue] [1 [epsilon]] [11 [epsilon]] [14 [epsilon]] [10 [epsilon]]]
-[[angular] [8 [epsilon]] [18 [epsilon]] [8 [epsilon]] [23 [epsilon]]]
-[[angular derivative] [57 [epsilon]] [45 [epsilon]] [25 [epsilon]] [43 [epsilon]]]
-[[radial, first kind] [4 [epsilon]] [2 [epsilon]] [8 [epsilon]] [1100 [epsilon]]]
-[[radial, second kind] [17 [epsilon]] [3 [epsilon]] [20 [epsilon]] [1000 [epsilon]]]
+[[eigenvalue] [1 [epsilon]] [1 [epsilon]] [1 [epsilon]] [1 [epsilon]]]
+[[angular] [6 [epsilon]] [16 [epsilon]] [10 [epsilon]] [15 [epsilon]]]
+[[angular derivative] [26 [epsilon]] [36 [epsilon]] [51 [epsilon]] [49 [epsilon]]]
+[[radial, first kind] [3 [epsilon]] [4 [epsilon]] [6 [epsilon]] [10 [epsilon]]]
+[[radial, second kind] [2 [epsilon]] [3 [epsilon]] [6 [epsilon]] [25 [epsilon]]]
 ]
 
-The largest errors are in the oblate radial functions near [xi] = 0 for large /c/ and /m/, where the low-order
-expansion coefficients lose accuracy (the eigenvalue, about -c[super 2], has an absolute error of about c[super 2][epsilon]).
-For [xi] - 1 down to 10[super -6] the prolate radial functions stay within a few tens of [epsilon],
+The eigenvalues are correctly rounded in all but a few cases (at most 0.84 ulp).
+Where the angular functions are exponentially small (oblate, near [eta] = 0, large /c/) they are also ill-conditioned
+in /c/: at /c/ = 30, |c [part]Ps/[part]c / Ps| [asymp] 28 at [eta] = 0, so errors of a few [epsilon] there are within the conditioning.
+For [xi] - 1 down to 10[super -6] the prolate radial functions stay within a few [epsilon], and the second kind within a few times
+its condition number |([xi] - 1)R'/R| in [xi] - 1 (which is exact for a double [xi] near 1),
 and for large c[xi] the radial functions oscillate rapidly, so their condition number |[xi]R'/R| is at least about c[xi].
-Near [xi] = 0 the oblate R[super (2)] is written as a combination of the even and odd solutions at 0, one of whose coefficients
-follows exactly from the Wronskian; the other (R[super (2)](0) or R[super (2)]'(0)) is exponentially small for large /c/.
 At large [xi] the phase c[radic]([xi][super 2] - [tau]) is carried in two parts, so the radial functions stay within a few times
 their condition number.
 On the same grid `scipy.special.pro_rad2` and `obl_rad2` (SciPy 1.18) have no correct digits at many points.
@@ -120,6 +149,12 @@ The eigenvalue is bracketed by Sturm bisection on the symmetrized tridiagonal ma
 for the Legendre expansion coefficients d[sub k] (Abramowitz and Stegun 21.7.3) and polished with Newton's method
 on Bouwkamp's continued fraction. The coefficients come from the continued fractions, matched at the largest |d[sub k]|
 so that both run in their stable directions.
+For large /c/ the eigenvalue and the denominators of these continued fractions are small differences of terms of size c[super 2],
+so rounding the eigenvalue alone costs an absolute error of about c[super 2][epsilon]: 17 ulps of the eigenvalue, 1000 [epsilon] in
+the low-order d[sub k] at /c/ = 50, and a bias of several [epsilon] in solutions integrated where they grow exponentially. As Arb does with
+guard bits, the step that amplifies the rounding is repeated at higher precision: Bouwkamp's residual at the rounded eigenvalue,
+in double length, gives its low part by one Newton step, and the continued fractions for the d[sub k] are rerun in double length
+with the eigenvalue to that precision. The integrations use the low part in the coefficient [lambda] - s[eta][super 2] of the equation.
 
 The angular functions are sums of Ferrers functions. Where that sum cancels, near [eta] = 0 for oblate and near
 [eta] = [plusminus]1 for prolate functions with large /c/, the angular equation is integrated by Taylor series from [eta] = 0
@@ -137,6 +172,20 @@ without cancellation (small /c/), and otherwise from the asymptotic expansion of
 with the phase c[radic]([xi][super 2] - [tau]), [tau] = [plusminus]1 - [lambda]/c[super 2], chosen to match the local wavenumber so that its coefficients
 do not grow with /c/. Either is evaluated at the nearest point where it is accurate and integrated inward by
 Taylor series, the direction in which the second-kind function dominates.
+The integration's rounding adds a few [epsilon] times R[super (1)], which near [xi] = 1, where R[super (1)] is several times R[super (2)],
+is far outside the conditioning in [xi] - 1. There (prolate, /c/ > 8, [xi] - 1 < 1/8) it runs in double length,
+from the asymptotic expansion at [xi] = min(1 + c/8, 4); this costs up to five times as much.
+
+Near [xi] = 0 (for [xi] < min(1, 4/c)) the oblate R[super (2)] is a combination A u[sub e] + B u[sub o] of the even and odd
+solutions at 0. The Wronskian gives the coefficient of the solution with the parity of Ps[sub n][super m] exactly. The other one,
+R[super (2)](0) or R[super (2)]'(0), is exponentially small for large /c/ and is lost to cancellation by any inward integration.
+For large /c/ the oblate eigenvalues come in pairs, degrees /n/ and /n/ [plusminus] 1, split by an exponentially small
+[Delta] = [lambda][sub o] - [lambda][sub e]. With f = R[super (2)] of degree /n/ and g the first-kind function of its partner, the radial equation
+gives d/d[xi][([xi][super 2]+1) W(f, g)] = ([lambda][sub g] - [lambda][sub f]) f g, and W vanishes at infinity, so the coefficient is
+-[Delta] [int][sub 0][super [infin]] f g d[xi] divided by g(0) or g'(0). The same identity for the angular functions on [0, 1] gives
+[Delta] = Ps[sub e](0) Ps[sub o]'(0) / [int][sub 0][super 1] Ps[sub e] Ps[sub o] d[eta] to full relative accuracy.
+These are computed by an exact product of Taylor series out to [xi] = max(1, (10 - 0.6 ln [epsilon])/c), and beyond that
+from the asymptotic expansion: the slowly varying part term by term, the oscillating part by repeated integration by parts.
 
 [h4 References]
 

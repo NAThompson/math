@@ -20,4 +20,6 @@ void compile_and_link_test()
    check_result<double>(boost::math::prolate_spheroidal_radial_1(2u, 1u, d, d));
    double derivative;
    check_result<double>(boost::math::oblate_spheroidal_radial_2(2u, 1u, d, d, &derivative));
+   check_result<double>(boost::math::prolate_spheroidal<double>(2u, 1u, d).radial_2(d, &derivative));
+   check_result<float>(boost::math::oblate_spheroidal<float>(2u, 1u, f).angular(f));
 }
