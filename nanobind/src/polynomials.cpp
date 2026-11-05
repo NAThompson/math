@@ -26,9 +26,9 @@ void bmpy::bind_polynomials(nb::module_& m) {
       BMPY_URL("sf_poly/legendre"));
    BMPY_I1R1(laguerre, unsigned, "n", "x", "The Laguerre polynomial Lₙ(x), orthogonal for e^(−x) on [0, ∞)."
       BMPY_URL("sf_poly/laguerre"));
-   bmpy::def_vec<Int<unsigned>, Int<unsigned>, Real>(
-       m, "laguerre", []<class T>(unsigned n, unsigned mm, T x) { return bm::laguerre(n, mm, x); }, {"n", "m", "x"},
-       "The associated Laguerre polynomial Lₙ^m(x); as scipy.special.eval_genlaguerre(n, m, x)." BMPY_URL("sf_poly/laguerre"));
+   bmpy::def_vec<Int<unsigned>, Real, Real>(
+       m, "laguerre", []<class T>(unsigned n, T alpha, T x) { return bm::laguerre(n, alpha, x); }, {"n", "alpha", "x"},
+       "The generalized Laguerre polynomial Lₙ^(α)(x), any real α; as scipy.special.eval_genlaguerre(n, alpha, x)." BMPY_URL("sf_poly/laguerre"));
    BMPY_I1R1(hermite, unsigned, "n", "x",
       "The (physicists') Hermite polynomial Hₙ(x), orthogonal for e^(−x²); as scipy.special.eval_hermite."
       BMPY_URL("sf_poly/hermite"));

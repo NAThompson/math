@@ -42,6 +42,7 @@ NB_MODULE(_ext, m) {
    bmpy::bind_elliptic(m);
    bmpy::bind_jacobi_theta(m);
    bmpy::bind_spheroidal(m);
+   bmpy::bind_struve(m);
    bmpy::bind_polynomials(m);
    bmpy::bind_hypergeometric(m);
    nb::module_ distributions = submodule(m, "distributions", "Probability distributions.");

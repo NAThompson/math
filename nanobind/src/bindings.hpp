@@ -18,6 +18,7 @@ void bind_bessel(nb::module_& m);
 void bind_elliptic(nb::module_& m);
 void bind_jacobi_theta(nb::module_& m);
 void bind_spheroidal(nb::module_& m);
+void bind_struve(nb::module_& m);
 void bind_polynomials(nb::module_& m);
 void bind_hypergeometric(nb::module_& m);
 void bind_distributions_continuous(nb::module_& m);

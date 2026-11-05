@@ -20,7 +20,7 @@ def test_eigenvalues():
     # At c = 0 both are n(n + 1); pro_cv and obl_cv differ by ±c².
     assert bm.prolate_spheroidal_eigenvalue(3, 1, 0.0) == pytest.approx(12.0, rel=1e-15)
     assert bm.oblate_spheroidal_eigenvalue(3, 1, 0.0) == pytest.approx(12.0, rel=1e-15)
-    assert bm.prolate_spheroidal_eigenvalue(2, 1, 1.0) + 1 == pytest.approx(6.424699143775136, rel=4e-16)
+    assert bm.prolate_spheroidal_eigenvalue(2, 1, 1.0) == pytest.approx(5.4246991437751347200, rel=2e-16)
     with pytest.raises(ValueError):
         bm.prolate_spheroidal_eigenvalue(1, 2, 1.0)  # n < m
 
@@ -53,3 +53,16 @@ def test_prime_matches_finite_difference(f):
     assert fp(3, 1, 2.5, x) == pytest.approx(fd, rel=1e-8)
     xs = np.array([x, x + 0.1])
     np.testing.assert_array_equal(fp(3, 1, 2.5, xs), [fp(3, 1, 2.5, v) for v in xs])
+
+
+@pytest.mark.parametrize("oblate", [False, True])
+def test_classes_match_functions(oblate):
+    w = (bm.oblate_spheroidal if oblate else bm.prolate_spheroidal)(3, 1, 2.5)
+    p = "oblate_spheroidal_" if oblate else "prolate_spheroidal_"
+    assert w.eigenvalue == getattr(bm, p + "eigenvalue")(3, 1, 2.5)
+    eta, xi = np.array([-0.4, 0.3]), np.array([0.6, 1.7]) if oblate else np.array([1.2, 1.7])
+    for name, x in [("angular", eta), ("radial_1", xi), ("radial_2", xi)]:
+        for suffix in ("", "_prime"):
+            np.testing.assert_array_equal(getattr(w, name + suffix)(x), getattr(bm, p + name + suffix)(3, 1, 2.5, x))
+    with pytest.raises(ValueError):
+        bm.prolate_spheroidal(1, 2, 1.0)  # n < m

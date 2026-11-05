@@ -235,6 +235,15 @@ export interface BoostMath {
   oblate_spheroidal_radial_2_prime(n: number, m: number, c: number, xi: number): number;
   oblate_spheroidal_radial_2_array(n: number, m: number, c: number, xis: Samples): Float64Array;
   oblate_spheroidal_radial_2_prime_array(n: number, m: number, c: number, xis: Samples): Float64Array;
+  /** Struve H_v(x) and modified Struve L_v(x), with the derivatives in x; x < 0 only for integer v (NaN otherwise). */
+  struve_h(v: number, x: number): number;
+  struve_h_prime(v: number, x: number): number;
+  struve_h_array(v: number, xs: Samples): Float64Array;
+  struve_h_prime_array(v: number, xs: Samples): Float64Array;
+  struve_l(v: number, x: number): number;
+  struve_l_prime(v: number, x: number): number;
+  struve_l_array(v: number, xs: Samples): Float64Array;
+  struve_l_prime_array(v: number, xs: Samples): Float64Array;
   jacobi_theta1(x: number, q: number): number;
   jacobi_theta1_array(x: number, qs: Samples): Float64Array;
   jacobi_theta2(x: number, q: number): number;

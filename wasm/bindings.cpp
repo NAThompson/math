@@ -39,6 +39,7 @@
 #include <vector>
 
 #include <boost/math/special_functions/spheroidal.hpp>
+#include <boost/math/special_functions/struve.hpp>
 namespace bm = boost::math;
 namespace st = boost::math::statistics;
 using namespace emscripten;
@@ -71,6 +72,12 @@ double with_order(double n, F f)
 #define FN(f, I) function(#f, +[](double n, double x) { return with_order<I>(n, [x](I k) { return bm::f(k, x); }); }); \
    function(#f "_array", +[](double n, const val& x) { \
       return map_last([](double n, double v) { return with_order<I>(n, [v](I k) { return bm::f(k, v); }); }, x, n); })
+
+// Struve functions f(v, x), with f_prime the derivative in x (the C++ derivative pointer).
+#define STRUVE(f) F2(f); \
+   function(#f "_prime", +[](double v, double x) { double d = NAN; bm::f(v, x, &d); return d; }); \
+   function(#f "_prime_array", +[](double v, const val& x) { \
+      return map_last([](double v, double x) { double d = NAN; bm::f(v, x, &d); return d; }, x, v); })
 
 // Spheroidal wave functions f(n, m, c, x), with f_prime the derivative in x (the C++ derivative pointer).
 #define SPHEROIDAL(f) \
@@ -419,6 +426,7 @@ EMSCRIPTEN_BINDINGS(boost_math)
    SPHEROIDAL(prolate_spheroidal_angular); SPHEROIDAL(oblate_spheroidal_angular);
    SPHEROIDAL(prolate_spheroidal_radial_1); SPHEROIDAL(prolate_spheroidal_radial_2);
    SPHEROIDAL(oblate_spheroidal_radial_1); SPHEROIDAL(oblate_spheroidal_radial_2);
+   STRUVE(struve_h); STRUVE(struve_l);
    F3(ellint_rf); F3(ellint_rd); F2(ellint_rc); F3(ellint_rg);
    F2(cyl_bessel_j_prime); F2(cyl_neumann_prime); F2(cyl_bessel_i_prime); F2(cyl_bessel_k_prime);
    // Zeros are numbered m = 1, 2, ...; the order n of gegenbauer and spherical_harmonic_* comes first.

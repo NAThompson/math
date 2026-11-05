@@ -201,6 +201,7 @@ CASES = [
     ("legendre_p_prime", (5, 0.3), lambda l, x: d(lambda t: mp.legendre(l, t), x)),
     ("legendre_q", (5, 0.3), lambda l, x: mp.legenq(l, 0, x)),
     ("laguerre", (5, 0.3), lambda n, x: mp.laguerre(n, 0, x)),
+    ("laguerre", (7, 0.5, 2.3), mp.laguerre),
     ("laguerre", (5, 2, 0.3), mp.laguerre),
     ("hermite", (5, 0.3), mp.hermite),
     ("chebyshev_t", (5, 0.3), mp.chebyt),
