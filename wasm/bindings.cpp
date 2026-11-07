@@ -427,6 +427,15 @@ EMSCRIPTEN_BINDINGS(boost_math)
    SPHEROIDAL(prolate_spheroidal_radial_1); SPHEROIDAL(prolate_spheroidal_radial_2);
    SPHEROIDAL(oblate_spheroidal_radial_1); SPHEROIDAL(oblate_spheroidal_radial_2);
    STRUVE(struve_h); STRUVE(struve_l);
+   // Fresnel C(x) and S(x); fresnel_cis gives both, [C, S], for the cost of one, and fresnel_cis_array interleaves them.
+   F1(fresnel_c); F1(fresnel_s);
+   function("fresnel_cis", +[](double x) { std::vector<cplx> z{bm::fresnel_cis(x)}; return to_js(z); });
+   function("fresnel_cis_array", +[](const val& xs) {
+      std::vector<double> x = convertJSArrayToNumberVector<double>(xs);
+      std::vector<cplx> z(x.size());
+      for (std::size_t k = 0; k < x.size(); ++k)
+         z[k] = bm::fresnel_cis(x[k]);
+      return to_js(z); });
    F3(ellint_rf); F3(ellint_rd); F2(ellint_rc); F3(ellint_rg);
    F2(cyl_bessel_j_prime); F2(cyl_neumann_prime); F2(cyl_bessel_i_prime); F2(cyl_bessel_k_prime);
    // Zeros are numbered m = 1, 2, ...; the order n of gegenbauer and spherical_harmonic_* comes first.

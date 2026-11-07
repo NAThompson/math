@@ -40,6 +40,15 @@ test('special functions', () => {
    close(bm.laguerre(100, 3.5), 0.38531832348347825);
    close(bm.hypergeometric_1F1(1, 2, 1), Math.E - 1);
    close(bm.cyl_bessel_j_zero(0, 1), 2.404825557695773);
+   close(bm.fresnel_c(1.5), 0.4452611760398215);
+   close(bm.fresnel_s(1.5), 0.6975049600820931);
+   const cs = bm.fresnel_cis_array([1.5, -1000.3]);
+   assert.equal(cs.length, 4);
+   close(cs[0], 0.4452611760398215);
+   close(cs[1], 0.6975049600820931);
+   close(cs[2], -0.5000448367037948);
+   close(cs[3], -0.49968496017986497);
+   assert.deepEqual([...bm.fresnel_cis(1.5)], [bm.fresnel_c(1.5), bm.fresnel_s(1.5)]);
 });
 
 test('errors return NaN or infinity', () => {
