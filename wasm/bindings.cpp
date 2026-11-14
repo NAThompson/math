@@ -17,6 +17,7 @@
 #include <boost/math/special_functions.hpp>
 #include <boost/math/filters/trend_filter.hpp>
 #include <boost/math/filters/wavelet_denoise.hpp>
+#include <boost/math/optimization/nsga2.hpp>
 #include <boost/math/tools/fft.hpp>
 #include <boost/math/tools/multivariate_roots.hpp>
 #include <boost/math/statistics/anderson_darling.hpp>
@@ -28,6 +29,8 @@
 #include <boost/math/statistics/z_test.hpp>
 
 #include <emscripten/bind.h>
+#include <emscripten/em_js.h>
+#include <emscripten/stack.h>
 
 #include <algorithm>
 #include <cerrno>
@@ -187,11 +190,42 @@ void distribution(const char* name)
       });
 }
 
+// A JavaScript exception leaves through the wasm frames without unwinding them, so the stack pointer is first put
+// back where it was when JavaScript called in: at the base of the stack, or where the callback that is running was
+// called from. Otherwise every error would leak some of the 64 kB of stack, and the module break once it is gone.
+EM_JS_DEPS(boost_math_stack, "$stackSave,$stackRestore,$Emval,$UTF8ToString");
+static std::uintptr_t callback_stack = 0;
+
+EM_JS(void, throw_range_error, (const char* what, std::uintptr_t stack), {
+   const error = new RangeError(UTF8ToString(what));
+   stackRestore(stack);
+   throw error;
+});
+
 // The FFTs and statistics throw for bad sizes, which would abort the module, so check first and throw a RangeError.
 [[noreturn]] void range_error(const std::string& what)
 {
-   val::global("RangeError").new_(what).throw_();
+   throw_range_error(what.c_str(), callback_stack ? callback_stack : emscripten_stack_get_base());
    __builtin_unreachable();
+}
+
+EM_JS(EM_VAL, call_js, (EM_VAL f, EM_VAL x, std::uintptr_t* callback_stack, std::uintptr_t base), {
+   const outer = HEAPU32[callback_stack >> 2];
+   HEAPU32[callback_stack >> 2] = stackSave();
+   try {
+      return Emval.toHandle(Emval.toValue(f)(Emval.toValue(x)));
+   } catch (e) {
+      stackRestore(outer || base);
+      throw e;
+   } finally {
+      HEAPU32[callback_stack >> 2] = outer;
+   }
+});
+
+// f(x) for a callback f, which may call back into the module, and throw.
+val call(const val& f, const val& x)
+{
+   return val::take_ownership(call_js(f.as_handle(), x.as_handle(), &callback_stack, emscripten_stack_get_base()));
 }
 
 // f(x) for the multivariate solvers returns [F, J] or [F, J, d2]: F an array of n, J n arrays of n or n*n numbers
@@ -216,14 +250,14 @@ struct js_system
 
    auto operator()(const std::vector<double>& x) const
    {
-      val r = f(to_js(x));
+      val r = call(f, to_js(x));
       if (!r.isArray() || r["length"].as<std::size_t>() < 2)
          range_error("f(x) must return [F, J] or [F, J, d2].");
       val d2 = r["length"].as<std::size_t>() > 2 ? r[2] : val::undefined();
       auto second = [d2, n = n](const std::vector<double>& v) {
          if (d2.typeOf().as<std::string>() != "function")
             range_error("multivariate_halley: f(x) must return [F, J, d2], with d2 a function.");
-         return numbers(d2(to_js(v)), n, "d2(v)");
+         return numbers(call(d2, to_js(v)), n, "d2(v)");
       };
       return std::make_tuple(numbers(r[0], n, "F(x)"), numbers(r[1], n * n, "J(x)"), second);
    }
@@ -245,6 +279,177 @@ val multivariate_root(const val& f, const val& x0, double digits, double max_ite
    o.set("iterations", double(it));
    return o;
 }
+
+// NSGA-II. The C++ throws for bad parameters and objectives, so they are checked here first and throw a RangeError.
+// Points and objectives go out as arrays of rows, and come in so or as one array of numbers, row major.
+namespace nsga2_js
+{
+namespace bo = bm::optimization;
+using vec = std::vector<double>;
+
+val rows(const std::vector<vec>& m)
+{
+   val a = val::array();
+   for (const vec& r : m)
+      a.call<void>("push", js_system::to_js(r));
+   return a;
+}
+
+// {x, f}: the points of a front and their objectives.
+val front(const std::vector<std::pair<vec, vec>>& members)
+{
+   val x = val::array(), f = val::array();
+   for (const auto& p : members)
+   {
+      x.call<void>("push", js_system::to_js(p.first));
+      f.call<void>("push", js_system::to_js(p.second));
+   }
+   val o = val::object();
+   o.set("x", x);
+   o.set("f", f);
+   return o;
+}
+
+// r rows of c numbers; one of r and c may be 0, for any number of rows, or any number but 0 of columns.
+std::vector<vec> matrix(const val& a, std::size_t r, std::size_t c, const char* what)
+{
+   std::vector<vec> m;
+   const std::size_t length = a["length"].as<std::size_t>();
+   if (length > 0 && a[0].isNumber())
+   {
+      const vec v = convertJSArrayToNumberVector<double>(a);
+      c = c ? c : v.size() / r;
+      for (std::size_t i = 0; c && i < v.size(); i += c)
+         m.emplace_back(v.begin() + i, v.begin() + std::min(i + c, v.size()));
+   }
+   else
+      for (std::size_t i = 0; i < length; ++i)
+         m.push_back(convertJSArrayToNumberVector<double>(a[i]));
+   c = c || m.empty() ? c : m[0].size();
+   if ((r && m.size() != r) || !c || std::any_of(m.begin(), m.end(), [c](const vec& v) { return v.size() != c; }))
+      range_error(std::string(what) + " must be " + (r ? std::to_string(r) + " rows" : "rows") + " of " +
+                  (c ? std::to_string(c) : "the same, nonzero, count of") + " numbers.");
+   return m;
+}
+
+val option(const val& o, const char* name)
+{
+   val v = o[name];
+   return v.isNull() ? val::undefined() : v;
+}
+
+double real(const val& o, const char* name, double fallback)
+{
+   val v = option(o, name);
+   return v.isUndefined() ? fallback : v.as<double>();
+}
+
+// An integer option in [least, 2^bits].
+double whole(const val& o, const char* name, double fallback, int least, int bits)
+{
+   const double v = real(o, name, fallback);
+   if (!(v == std::trunc(v) && v >= least && v <= std::ldexp(1.0, bits)))
+      range_error(std::string(name) + " must be an integer in [" + std::to_string(least) + ", 2^" + std::to_string(bits) + "].");
+   return v;
+}
+
+struct settings
+{
+   bo::nsga2_parameters<vec> params;
+   std::vector<vec> initial;  // params.initial_population is set where the parameters are used
+   std::uint64_t seed;
+};
+
+// max_generations is an option of the function only: the caller of ask and tell decides when to stop.
+settings make(const val& lower, const val& upper, const val& options, bool run)
+{
+   static const char* const names[] = {"max_generations", "population_size", "crossover_probability", "crossover_distribution_index",
+                                       "mutation_probability", "mutation_distribution_index", "seed", "initial_population"};
+   settings s;
+   auto& p = s.params;
+   p.threads = 1;  // the module is built without pthreads
+   p.lower_bounds = convertJSArrayToNumberVector<double>(lower);
+   p.upper_bounds = convertJSArrayToNumberVector<double>(upper);
+   const std::size_t d = p.lower_bounds.size();
+   auto inside = [&p](const vec& x) {
+      bool ok = true;
+      for (std::size_t i = 0; i < x.size(); ++i)
+         ok = ok && std::isfinite(p.lower_bounds[i]) && std::isfinite(p.upper_bounds[i]) && p.lower_bounds[i] <= x[i] && x[i] <= p.upper_bounds[i];
+      return ok;
+   };
+   if (d == 0 || p.upper_bounds.size() != d || !inside(p.lower_bounds))
+      range_error("The bounds must be finite, as many lower as upper and at least one, with lower <= upper.");
+   const val o = options.isUndefined() || options.isNull() ? val::object() : options;
+   const val keys = val::global("Object").call<val>("keys", o);
+   for (std::size_t i = 0; i < keys["length"].as<std::size_t>(); ++i)
+      if (std::find(names + !run, std::end(names), keys[i].as<std::string>()) == std::end(names))
+         range_error("Unknown option " + keys[i].as<std::string>() + ".");
+   p.population_size = std::size_t(whole(o, "population_size", double(p.population_size), 4, 24));
+   p.max_generations = std::size_t(whole(o, "max_generations", double(p.max_generations), 1, 24));
+   s.seed = std::uint64_t(whole(o, "seed", 0, 0, 53));
+   p.crossover_probability = real(o, "crossover_probability", p.crossover_probability);
+   p.mutation_probability = real(o, "mutation_probability", p.mutation_probability);
+   if (!(p.crossover_probability >= 0 && p.crossover_probability <= 1) || p.mutation_probability < 0 || p.mutation_probability > 1)
+      range_error("crossover_probability must be in [0, 1], and mutation_probability in [0, 1] or NaN, for 1/dimension.");
+   p.crossover_distribution_index = real(o, "crossover_distribution_index", p.crossover_distribution_index);
+   p.mutation_distribution_index = real(o, "mutation_distribution_index", p.mutation_distribution_index);
+   if (!(p.crossover_distribution_index >= 0 && std::isfinite(p.crossover_distribution_index)) ||
+       !(p.mutation_distribution_index >= 0 && std::isfinite(p.mutation_distribution_index)))
+      range_error("The distribution indices must be nonnegative and finite.");
+   const val initial = option(o, "initial_population");
+   if (!initial.isUndefined())
+      s.initial = matrix(initial, 0, d, "initial_population");
+   if (s.initial.size() > p.population_size || !std::all_of(s.initial.begin(), s.initial.end(), inside))
+      range_error("initial_population must be at most population_size points in the bounds.");
+   return s;
+}
+
+val minimize(const val& f, const val& lower, const val& upper, const val& options)
+{
+   settings s = make(lower, upper, options, true);
+   s.params.initial_population = &s.initial;
+   std::mt19937_64 gen(s.seed);
+   std::size_t objectives = 0;
+   // As for the multivariate solvers, this RangeError and what f throws unwind through the optimizer, whose memory leaks.
+   return front(bo::nsga2([&](const vec& x) {
+      vec y = convertJSArrayToNumberVector<double>(call(f, js_system::to_js(x)));
+      if (y.empty() || (objectives && y.size() != objectives))
+         range_error("f(x) must return the same number of objectives, at least one, for every x.");
+      objectives = y.size();
+      return y;
+   }, s.params, gen));
+}
+
+struct optimizer
+{
+   bo::nsga2_optimizer<vec, vec> o;
+   std::size_t n;
+   bool asked = false;
+   std::size_t objectives = 0;
+
+   val ask()
+   {
+      asked = true;
+      return rows(o.ask());
+   }
+   void tell(const val& values)
+   {
+      if (!asked)
+         range_error("tell takes the objectives of the points last asked for: call ask first.");
+      std::vector<vec> v = matrix(values, n, objectives, "The objectives");
+      objectives = v[0].size();
+      o.tell(std::move(v));
+      asked = false;
+   }
+};
+
+optimizer make_optimizer(const val& lower, const val& upper, const val& options)
+{
+   settings s = make(lower, upper, options, false);
+   s.params.initial_population = &s.initial;
+   return {bo::nsga2_optimizer<vec, vec>(s.params, std::mt19937_64(s.seed)), s.params.population_size};
+}
+} // namespace nsga2_js
 
 std::size_t length(double n)
 {
@@ -506,6 +711,19 @@ EMSCRIPTEN_BINDINGS(boost_math)
    function("multivariate_halley", +[](const val& f, const val& x0) { return multivariate_root<true>(f, x0, 53, 1000); });
    function("multivariate_halley", +[](const val& f, const val& x0, double d) { return multivariate_root<true>(f, x0, d, 1000); });
    function("multivariate_halley", &multivariate_root<true>);
+
+   function("nsga2", +[](const val& f, const val& l, const val& u) { return nsga2_js::minimize(f, l, u, val::undefined()); });
+   function("nsga2", &nsga2_js::minimize);
+   class_<nsga2_js::optimizer>("nsga2_optimizer")
+      .constructor(+[](const val& l, const val& u) { return nsga2_js::make_optimizer(l, u, val::undefined()); })
+      .constructor(&nsga2_js::make_optimizer)
+      .function("ask", &nsga2_js::optimizer::ask)
+      .function("tell", &nsga2_js::optimizer::tell)
+      .function("front", +[](const nsga2_js::optimizer& self) { return nsga2_js::front(self.o.front()); })
+      .function("population", +[](const nsga2_js::optimizer& self) { return nsga2_js::rows(self.o.population()); })
+      .function("objectives", +[](const nsga2_js::optimizer& self) { return nsga2_js::rows(self.o.objectives()); })
+      .function("ranks", +[](const nsga2_js::optimizer& self) {
+         return val(typed_memory_view(self.o.ranks().size(), self.o.ranks().data())).call<val>("slice"); });
 
    // A non-integer k becomes -1, which the filter rejects like any other bad k: the result is all NaN.
    function("trend_filter", +[](const val& x, double k, double lambda) {

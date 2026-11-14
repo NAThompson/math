@@ -31,10 +31,12 @@ bm.trend_filter(y, 1, 10);                    // piecewise linear fit; bm.trend_
 bm.wavelet_denoise(y);                        // wavelet and rule by cross-validation; or (y, "symlet", 8, "sure", sigma)
 bm.wavelet_transform(y, "daubechies", 4);     // any length: [a_L | d_L | ... | d_1]; inverse_wavelet_transform undoes it
 bm.multivariate_halley(x => [F(x), J(x), v => d2(x, v)], x0);  // {root, iterations}; also multivariate_newton
+bm.nsga2(x => [f1(x), f2(x)], lower, upper, { seed: 1 });      // {x, f}: the Pareto front; nsga2_optimizer has ask and tell
 ```
 
 `boost_math.d.ts` documents the whole API and its conventions. The build directory is an npm package (`npm pack`).
-Errors return NaN or infinity rather than throwing, except that bad sizes, shapes and axes throw a `RangeError`.
+Errors return NaN or infinity rather than throwing, except that bad sizes, shapes, axes and `nsga2` parameters
+throw a `RangeError`.
 
 `-DBOOST_MATH_WASM_RELAXED_SIMD=ON` gives the double-double arithmetic a hardware fma, but relaxed SIMD needs
 Chrome or Edge 114+ or Firefox 146+, and Safari can't load it.

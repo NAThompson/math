@@ -289,3 +289,105 @@ test('multivariate_newton and multivariate_halley', () => {
   const far = [3, 0.5];
   assert.ok(bm.multivariate_halley(circle, far).iterations < bm.multivariate_newton(circle, far).iterations);
 });
+
+// ZDT1 in 10 variables, whose front is f2 = 1 - sqrt(f1); the hypervolume of the front against (1.1, 1.1) is 1.21 - 1/3.
+function zdt1(x) {
+  const g = 1 + 9 * x.slice(1).reduce((a, b) => a + b, 0) / (x.length - 1);
+  return [x[0], g * (1 - Math.sqrt(x[0] / g))];
+}
+const dominates = (a, b) => a.every((v, i) => v <= b[i]) && a.some((v, i) => v < b[i]);
+// f is in increasing order of f1, so decreasing in f2.
+const hypervolume = (f) => f.reduce((s, v, i) => s + (1.1 - v[0]) * ((i ? f[i - 1][1] : 1.1) - v[1]), 0);
+function check_front({ x, f }, objective, lower, upper) {
+  assert.ok(x.length > 0 && x.length === f.length);
+  x.forEach((p, i) => {
+    assert.ok(p instanceof Float64Array && f[i] instanceof Float64Array);
+    assert.ok(p.every((v, k) => v >= lower[k] && v <= upper[k]));
+    assert.deepEqual([...f[i]], [...objective(p)]);
+    assert.ok(!f.some((g) => dominates(g, f[i])));
+  });
+}
+
+test('nsga2', () => {
+  const lower = new Array(10).fill(0), upper = new Float64Array(10).fill(1);
+  const options = { population_size: 40, max_generations: 100, seed: 3 };
+  const front = bm.nsga2(zdt1, lower, upper, options);
+  check_front(front, zdt1, lower, upper);
+  assert.ok(front.x.length >= 20 && front.x.length <= 40);
+  assert.ok(hypervolume(front.f) > 0.8, `${hypervolume(front.f)}`);
+  assert.deepEqual(bm.nsga2(zdt1, lower, upper, options), front);
+  assert.notDeepEqual(bm.nsga2(zdt1, lower, upper, { ...options, seed: 4 }), front);
+  // The defaults, on Schaffer's problem, whose Pareto set is 0 <= x <= 2; then a warm start from its front.
+  const schaffer = (x) => [x[0] ** 2, (x[0] - 2) ** 2];
+  const s = bm.nsga2(schaffer, [-10], [10]);
+  check_front(s, schaffer, [-10], [10]);
+  assert.ok(s.x.length > 50 && s.x.every((p) => p[0] > -0.01 && p[0] < 2.01));
+  const warm = bm.nsga2(schaffer, [-10], [10], { max_generations: 1, initial_population: s.x, mutation_probability: NaN, seed: null });
+  assert.ok(warm.x.every((p) => p[0] > -0.01 && p[0] < 2.01));
+  for (const bad of [{ population_size: 3 }, { population_size: 4.5 }, { max_generations: 0 }, { crossover_probability: 2 },
+                     { mutation_probability: -0.1 }, { crossover_distribution_index: -1 }, { mutation_distribution_index: Infinity },
+                     { seed: -1 }, { seed: 0.5 }, { threads: 2 }, { populationSize: 50 }, { initial_population: [[11]] },
+                     { initial_population: [[NaN]] }, { initial_population: [[0, 0]] }, { initial_population: [1, 2, 3, 4, 5], population_size: 4 }])
+    assert.throws(() => bm.nsga2(schaffer, [-10], [10], bad), RangeError, JSON.stringify(bad));
+  for (const [lo, hi] of [[[], []], [[0], [1, 2]], [[1], [0]], [[0], [Infinity]], [[NaN], [1]]])
+    assert.throws(() => bm.nsga2(schaffer, lo, hi), RangeError);
+  assert.throws(() => bm.nsga2(() => [], [-10], [10]), RangeError);
+  assert.throws(() => bm.nsga2((x) => (x[0] > 0 ? [1, 2] : [1]), [-10], [10]), RangeError);
+  assert.throws(() => bm.nsga2(() => { throw new TypeError('mine'); }, [-10], [10]), TypeError);
+  assert.throws(() => bm.nsga2(() => undefined, [-10], [10]));
+  // Errors don't use up the stack, and one caught inside f leaves the run as it was.
+  for (let i = 0; i < 1000; ++i) {
+    assert.throws(() => bm.nsga2(schaffer, [-10], [10], { population_size: 3 }), RangeError);
+    assert.throws(() => bm.nsga2((x) => (x[0] > 0 ? [1, 2] : [1]), [-10], [10]), RangeError);
+    assert.throws(() => bm.nsga2(() => { throw new TypeError('mine'); }, [-10], [10]), TypeError);
+  }
+  const careless = (x) => { assert.throws(() => bm.mean([]), RangeError); return zdt1(x); };
+  assert.deepEqual(bm.nsga2(careless, lower, upper, options), front);
+});
+
+test('nsga2_optimizer', () => {
+  const lower = new Array(10).fill(0), upper = new Array(10).fill(1);
+  const run = (flat) => {
+    const opt = new bm.nsga2_optimizer(lower, upper, { population_size: 40, seed: 3 });
+    assert.equal(opt.front().x.length + opt.population().length + opt.objectives().length + opt.ranks().length, 0);
+    assert.throws(() => opt.tell(new Float64Array(80)), RangeError);  // nothing was asked for
+    for (let generation = 0; generation <= 100; ++generation) {
+      const x = opt.ask();
+      assert.equal(x.length, 40);
+      assert.deepEqual(opt.ask(), x);
+      const f = x.map(zdt1);
+      opt.tell(flat ? Float64Array.from(f.flat()) : f);
+    }
+    return opt;
+  };
+  const opt = run(false), front = opt.front();
+  check_front(front, zdt1, lower, upper);
+  assert.ok(hypervolume(front.f) > 0.8, `${hypervolume(front.f)}`);
+  const flat = run(true);
+  assert.deepEqual(flat.front(), front);
+  flat.delete();
+  const x = opt.population(), f = opt.objectives(), ranks = opt.ranks();
+  assert.ok(ranks instanceof Uint32Array && x.length === 40 && f.length === 40 && ranks.length === 40);
+  x.forEach((p, i) => assert.deepEqual([...f[i]], zdt1(p)));
+  assert.ok(ranks.every((r, i) => r >= (i ? ranks[i - 1] : 0)) && ranks.filter((r) => r === 0).length >= front.x.length);
+  // A wrong number of points or of objectives leaves the optimizer as it was.
+  const points = opt.ask();
+  for (const bad of [points.slice(1).map(zdt1), points.map((p) => [p[0]]), points.map(() => []), new Float64Array(79), [], 7,
+                     points.map((p, i) => (i === 5 ? [1, 2, 3] : zdt1(p)))])
+    assert.throws(() => opt.tell(bad), RangeError);
+  assert.deepEqual(opt.ask(), points);
+  opt.tell(points.map(zdt1));
+  check_front(opt.front(), zdt1, lower, upper);
+  opt.delete();
+  // The rows given come first in the first generation.
+  const warm = new bm.nsga2_optimizer(lower, upper, { population_size: 40, initial_population: front.x.slice(0, 10) });
+  assert.deepEqual(warm.ask().slice(0, 10), front.x.slice(0, 10));
+  warm.delete();
+  const defaults = new bm.nsga2_optimizer([-10], [10]);
+  assert.equal(defaults.ask().length, 100);
+  defaults.delete();
+  for (const bad of [{ population_size: 3 }, { max_generations: 10 }, { initial_population: [new Array(10).fill(2)] },
+                     { initial_population: new Array(41).fill(lower), population_size: 40 }])
+    assert.throws(() => new bm.nsga2_optimizer(lower, upper, bad), RangeError, JSON.stringify(bad));
+  assert.throws(() => new bm.nsga2_optimizer([1], [0]), RangeError);
+});

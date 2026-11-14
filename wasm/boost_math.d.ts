@@ -5,11 +5,11 @@
 // Types for boost_math.mjs, the Emscripten build of wasm/bindings.cpp. Everything is double precision.
 //
 // Memory: every array returned is a new Float64Array owned by JavaScript, so there is nothing to free. Objects
-// made with `new` (distributions, fft, real_fft) live in the wasm heap: call .delete() when done with them.
+// made with `new` (distributions, fft, real_fft, nsga2_optimizer) live in the wasm heap: call .delete() when done with them.
 //
 // Errors: nothing throws for bad values. Domain errors give NaN, overflow gives ±Infinity, and a distribution
 // constructed with invalid parameters gives NaN from every method. Bad sizes, shapes and axes throw a RangeError:
-// the fft and real_fft constructors and transforms, the *_axis functions and the statistics say which below.
+// the fft and real_fft constructors and transforms, the *_axis functions, the statistics and nsga2 say which below.
 
 /** Input arrays: Float64Array, Float32Array, number[] or any array-like of numbers. They are copied, never kept. */
 export type Samples = ArrayLike<number>;
@@ -59,6 +59,59 @@ export interface RealFFT extends Handle {
 export interface TestResult {
   statistic: number;
   p_value: number;
+}
+
+/** Points, one Float64Array each, and their objectives: f[i] holds the objectives of x[i]. */
+export interface ParetoFront {
+  x: Float64Array[];
+  f: Float64Array[];
+}
+
+/** The options of nsga2 and nsga2_optimizer, as in C++ and Python; undefined or null takes the default. */
+export interface Nsga2Options {
+  /** An integer in [4, 2^24]; 100. */
+  population_size?: number;
+  /** nsga2 only: an integer in [1, 2^24]; 250. The objectives are evaluated population_size (max_generations + 1) times. */
+  max_generations?: number;
+  /** The probability, in [0, 1], that a pair of parents is crossed (simulated binary crossover); 0.9. */
+  crossover_probability?: number;
+  /** Nonnegative and finite: the larger, the closer the children to their parents; 15. */
+  crossover_distribution_index?: number;
+  /** The probability, in [0, 1], that a variable is mutated (polynomial mutation); NaN, the default, is 1/dimension. */
+  mutation_probability?: number;
+  /** Nonnegative and finite; 20. */
+  mutation_distribution_index?: number;
+  /** An integer in [0, 2^53], 0 by default: the same seed gives the same result. */
+  seed?: number;
+  /**
+   * Up to population_size points in the bounds to start the first generation with, as rows or as one array, row
+   * major; the rest are random.
+   */
+  initial_population?: Samples[] | Samples;
+}
+
+/**
+ * NSGA-II in ask and tell form, for objectives evaluated in batches, in a worker or on a GPU: tell(values) takes the
+ * objectives of the points ask() last returned. The caller decides when to stop.
+ */
+export interface Nsga2Optimizer extends Handle {
+  /** The population_size points to evaluate: first the initial population, then the children of each generation. The same points until tell is called. */
+  ask(): Float64Array[];
+  /**
+   * The objectives, to be minimized, of the points last asked for, in their order: one row per point, or one array,
+   * row major. They may be NaN, which is dominated by everything else. RangeError, which leaves the optimizer as it
+   * was, unless ask was called since the last tell and there are population_size rows of as many objectives, at
+   * least one, as in the first tell.
+   */
+  tell(values: Samples[] | Samples): void;
+  /** The nondominated members of the population in lexicographic order of their objectives; empty before the first tell. */
+  front(): ParetoFront;
+  /** The population_size members kept by the last tell; empty before the first. */
+  population(): Float64Array[];
+  /** The objectives of each member of the population. */
+  objectives(): Float64Array[];
+  /** The front each member of the population is in: 0 for the nondominated, 1 for those only they dominate, and so on. */
+  ranks(): Uint32Array;
 }
 
 export interface BoostMath {
@@ -359,6 +412,16 @@ export interface BoostMath {
                       max_iterations?: number): { root: Float64Array; iterations: number };
   multivariate_halley(f: (x: Float64Array) => [Samples, Samples | Samples[], (v: Float64Array) => Samples], x0: Samples,
                       digits?: number, max_iterations?: number): { root: Float64Array; iterations: number };
+
+  // Multi-objective optimization by the genetic algorithm NSGA-II: every component of f(x) is minimized over the box
+  // lower <= x <= upper. A RangeError unless the bounds are finite, as many lower as upper and at least one, with
+  // lower <= upper, and the options are known and in the ranges given with Nsga2Options.
+  /**
+   * The nondominated points found and their objectives, in increasing order of the first objective. f must return
+   * the same number of objectives, at least one, for every x (else RangeError); what f throws propagates.
+   */
+  nsga2(f: (x: Float64Array) => Samples, lower: Samples, upper: Samples, options?: Nsga2Options): ParetoFront;
+  nsga2_optimizer: new (lower: Samples, upper: Samples, options?: Omit<Nsga2Options, "max_generations">) => Nsga2Optimizer;
 
   // Trend filtering: argmin_x 1/2 sum (y - x)^2 + lambda sum |D^(k+1) x|, piecewise constant (k = 0), linear (1)
   // or quadratic (2). Bad k or lambda, or fewer than k + 2 samples, give all NaN.
