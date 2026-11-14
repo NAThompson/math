@@ -1123,6 +1123,7 @@ test-suite misc :
    [ run test_ulp.cpp /boost/test//boost_unit_test_framework ]
    [ run git_issue_1419.cpp ]
    [ run git_issue_1621.cpp ]
+   [ run git_issue_1637.cpp ]
    [ compile-fail git_issue_1421.cpp ]
 
 #   [ run __temporary_test.cpp test_instances//test_instances : : : <test-info>always_show_run_output <pch>off ]
@@ -1171,11 +1172,13 @@ test-suite interpolators :
    [ run test_multilevel_coordinate_search.cpp : : : [ requires cxx17_if_constexpr cxx17_std_apply ] ]
    [ run test_turbo.cpp : : : [ requires cxx17_if_constexpr cxx17_std_apply ] ]
    [ run test_dycors.cpp : : : [ requires cxx17_if_constexpr cxx17_std_apply ] ]
+   [ run test_nsga2.cpp : : : [ requires cxx17_if_constexpr cxx17_std_apply ] ]
    [ run test_cma_es.cpp : : : [ requires cxx17_if_constexpr cxx17_std_apply ] ]
    [ compile compile_test/test_random_search_incl.cpp : [ requires cxx17_if_constexpr cxx17_std_apply ] ]
    [ compile compile_test/test_multilevel_coordinate_search_incl.cpp : [ requires cxx17_if_constexpr cxx17_std_apply ] ]
    [ compile compile_test/test_turbo_incl.cpp : [ requires cxx17_if_constexpr cxx17_std_apply ] ]
    [ compile compile_test/test_dycors_incl.cpp : [ requires cxx17_if_constexpr cxx17_std_apply ] ]
+   [ compile compile_test/test_nsga2_incl.cpp : [ requires cxx17_if_constexpr cxx17_std_apply ] ]
    [ compile compile_test/test_differential_evolution_incl.cpp : [ requires cxx17_if_constexpr cxx17_std_apply ] ]
    [ compile compile_test/test_jso_incl.cpp : [ requires cxx17_if_constexpr cxx17_std_apply ] ]
 ;
